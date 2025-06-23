@@ -70,7 +70,6 @@ This level of feedback is missing from many commercial devices.
 
 I am currently jobless and building this out of necessity. If this project helps you or inspires you, consider supporting my work:
 
-- [☕ Donate on Ko-fi](https://ko-fi.com/yourname)
 - [📥 Download my interactive résumé](https://shopiro.ca/cv)
 - [🌐 Visit Shopiro](https://shopiro.ca)
 
@@ -84,7 +83,7 @@ This project is licensed under the **Creative Commons BY-NC 4.0 License**.
 You are free to use, modify, and redistribute it **non-commercially** with attribution.
 
 > Commercial use (including manufacturing or sale) requires a separate license.  
-> Contact me: [your@email.com]
+> Contact me: jeremie@shopiro.ca
 
 For full terms, see [`LICENSE`](LICENSE.md).
 
