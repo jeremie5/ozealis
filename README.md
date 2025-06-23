@@ -8,7 +8,7 @@
 
 **Ozealis** is a fully open-source, modular air-pressure platform designed to offer a safer, more accessible alternative to overpriced CPAP machines. Born out of necessity, it is engineered for **reliability**, **affordability**, and **transparency**—without corporate gatekeeping or prescription walls.
 
-> Designed to be built for under **$50**, using common components and 3D-printed parts.
+> Designed to be built for under **$75**, using common components and 3D-printed parts.
 
 ---
 
