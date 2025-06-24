@@ -81,23 +81,12 @@ This level of visibility is absent in many commercial machines.
 
 ---
 
-## 💸 Support This Project
-
-I’m currently jobless and building this project out of necessity. If it helps you — or inspires you — consider supporting me directly:
-
-* 📥 [Download my interactive résumé](https://shopiro.ca/cv)
-* 🌐 [Visit Shopiro](https://shopiro.ca)
-
-Even \$5 helps me buy components, pay rent, and keep going.
-
----
-
 ## 📄 License
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**.
 
 > Commercial use (manufacturing, distribution, resale) requires a separate license.
-> Contact: **[jeremie@shopiro.ca](mailto:jeremie@shopiro.ca)**
+> Contact: **[team@ozealis.org](mailto:team@ozealis.org)**
 
 See [`LICENSE.md`](LICENSE.md) for full terms.
 
@@ -135,5 +124,6 @@ Fork → improve → PR.
 
 ---
 
-Made with urgency, necessity, and care by **Jérémie Fréreault** 🇨🇦
+Made with urgency, necessity, and care 🇨🇦
 *Because breathing shouldn't require a credit check.*
+Ozealis is a trademark of Shopiro Ltd.
