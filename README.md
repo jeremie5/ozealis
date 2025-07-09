@@ -5,6 +5,11 @@
 
 ---
 
+WARNING: This project is in pre-prototype / design phase. Nothing is tested yet.
+However, you’re welcome to follow, watch, or help out. Contributions and issues are welcome!
+
+---
+
 ## 💡 What Is Ozealis?
 
 Ozealis is a fully open-source, modular platform for exploring low-cost, user-driven air-pressure systems. It was created by necessity — for those of us who can’t afford to wait for diagnosis, approval, or overpriced medical devices.
@@ -17,20 +22,19 @@ Because sleep should be safe, and safety should be accessible.
 
 ## 🔧 Features
 
-- ✅ PTC fuse protection on all power paths  
-- ✅ Reverse polarity protection via MOSFET (no diode drop)  
-- ✅ Power outage alarm via buzzer and capacitor-based UPS  
-- ✅ DC5525 input (14V–35V) — compatible with laptop bricks & power stations  
-- ✅ Differential pressure sensing via physical baffle (not RPM guesswork)  
-- ✅ Pre/Post humidity & temperature sensing  
+- ✅ PTC fuse protection on all power paths
+- ✅ Reverse polarity protection via MOSFET (no diode drop)
+- ✅ Optional power outage alarm via buzzer and capacitor-based UPS
+- ✅ DC5525 input (11V–30V) — compatible with laptop bricks & power stations
+- ✅ Differential pressure sensing via physical baffle (not RPM guesswork)
+- ✅ Pre/Post humidity & temperature sensing
 - ✅ Modular accessory port (USB-A + I²C) for:
   - Heated hose module  
   - Humidifier module  
-- ✅ App-controlled via WiFi + Bluetooth  
-- ✅ 16MB onboard log memory  
-- ✅ Compatible with $6 standard CPAP hoses  
-- ✅ No proprietary parts, no DRM  
-- ✅ Fully 3D-printable enclosure with FDM-optimized geometry  
+- ✅ App-controlled via Bluetooth
+- ✅ Compatible with $6 standard CPAP hoses
+- ✅ No proprietary parts, no DRM
+- ✅ Fully 3D-printable enclosure with FDM-optimized geometry
 
 ---
 
