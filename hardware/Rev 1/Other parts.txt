@@ -1,0 +1,3 @@
+Motor: https://s.click.aliexpress.com/e/_on0QQjY
+LPS22HBTR (if unavailable for PCBA): https://s.click.aliexpress.com/e/_omS8MRu
+Barrel connector: https://s.click.aliexpress.com/e/_on21ypG
