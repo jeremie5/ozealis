@@ -1,6 +1,12 @@
 # Ozealis – The $75 Experimental CPAP Simulator
 
-> ⚠️ **DISCLAIMER:** Ozealis is not a certified medical device. It is intended strictly for **experimental**, **educational**, and **personal non-commercial** use only. Use at your own risk.
+> ⚠️ **NOT A MEDICAL DEVICE.** Experimental use only.  
+> **→ See full legal disclaimer below.**
+
+---
+
+WARNING: This project is in pre-prototype / design phase. Nothing is tested yet.
+However, you’re welcome to follow, watch, or help out. Contributions and issues are welcome!
 
 ---
 
@@ -16,20 +22,19 @@ Because sleep should be safe, and safety should be accessible.
 
 ## 🔧 Features
 
-- ✅ PTC fuse protection on all power paths  
-- ✅ Reverse polarity protection via MOSFET (no diode drop)  
-- ✅ Power outage alarm via buzzer and capacitor-based UPS  
-- ✅ DC5525 input (14V–35V) — compatible with laptop bricks & power stations  
-- ✅ Differential pressure sensing via physical baffle (not RPM guesswork)  
-- ✅ Pre/Post humidity & temperature sensing  
+- ✅ PTC fuse protection on all power paths
+- ✅ Reverse polarity protection via MOSFET (no diode drop)
+- ✅ Optional power outage alarm via buzzer and capacitor-based UPS
+- ✅ DC5525 input (11V–30V) — compatible with laptop bricks & power stations
+- ✅ Differential pressure sensing via physical baffle (not RPM guesswork)
+- ✅ Pre/Post humidity & temperature sensing
 - ✅ Modular accessory port (USB-A + I²C) for:
   - Heated hose module  
   - Humidifier module  
-- ✅ App-controlled via WiFi + Bluetooth  
-- ✅ 16MB onboard log memory  
-- ✅ Compatible with $6 standard CPAP hoses  
-- ✅ No proprietary parts, no DRM  
-- ✅ Fully 3D-printable enclosure with FDM-optimized geometry  
+- ✅ App-controlled via Bluetooth
+- ✅ Compatible with $6 standard CPAP hoses
+- ✅ No proprietary parts, no DRM
+- ✅ Fully 3D-printable enclosure with FDM-optimized geometry
 
 ---
 
@@ -123,6 +128,38 @@ Fork → improve → PR 💜
 - ✅ Web configurator for real-time control  
 - 🎥 YouTube demo + sound comparison  
 - 🌍 Translations (FR, EN, ES)
+
+---
+
+**CRITICAL DISCLAIMER — READ BEFORE BUILDING OR USING OZEALIS**  
+>   
+> 1. **No Medical Device.** Ozealis has **NOT** been reviewed or approved by any
+>    regulatory body (FDA, Health Canada, EU MDR, etc.). It is an
+>    **experimental air-pressure simulator** provided solely for research,
+>    educational and personal *non-commercial* use.  
+> 2. **No Professional Advice.** All documentation is for informational
+>    purposes only and does **not** constitute medical, engineering, or legal
+>    advice. Consult qualified professionals before any practical use.  
+> 3. **AS-IS, NO WARRANTIES.** The files, firmware and hardware designs are
+>    provided **“AS IS,” WITH ALL FAULTS, WITHOUT WARRANTIES** of any kind,
+>    express or implied, including but not limited to merchantability,
+>    fitness for a particular purpose and non-infringement.  
+> 4. **Assumption of Risk.** You assume **all risks** arising from loading,
+>    building, testing or using Ozealis. You are responsible for validating
+>    safety, performance and regulatory compliance of any assembly.  
+> 5. **Indemnity.** To the maximum extent permitted by law, you **agree to
+>    indemnify and hold harmless** Shopiro Ltd. and contributors from any
+>    claim, liability or expense (including legal fees) arising from your
+>    use, reproduction, or distribution of these materials.  
+> 6. **Limitation of Liability.** In no event shall Shopiro Ltd. or
+>    contributors be liable for **any indirect, special, incidental or
+>    consequential damages** (including personal injury or death) or for an
+>    amount exceeding **USD 10**, even if advised of the possibility.  
+> 7. **Governing Law & Venue.** These terms are governed by the laws of
+>    Québec, Canada, and you consent to exclusive jurisdiction of its courts.  
+>
+> **By cloning, downloading, or using any part of this repository you
+> acknowledge that you have read, understand, and agree to ALL of the above.**
 
 ---
 
