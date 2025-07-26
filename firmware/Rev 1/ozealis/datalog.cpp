@@ -1,7 +1,10 @@
 #include "datalog.h"
-static CircularBuffer<String, 3600*8> buf; // 8-hr @1 Hz (≈160 kB)
+#include <string>
+static CircularBuffer<String, 600> buf;  // 10 min @1 Hz  ≈ 2.6 kB
 
-void dl_init() { buf.clear(); }
+void dl_init() {
+  buf.clear();
+}
 
 void dl_push(const char* line) {
   if (buf.isFull()) buf.shift();
@@ -9,7 +12,7 @@ void dl_push(const char* line) {
 }
 std::string dl_getCsv() {
   std::string out;
-  for (size_t i=0;i<buf.size();++i) {
+  for (size_t i = 0; i < buf.size(); ++i) {
     out += buf[i].c_str();
     out += "\n";
   }

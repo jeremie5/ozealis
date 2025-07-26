@@ -6,6 +6,8 @@ enum OTAStatus : uint8_t {
   OTA_IDLE = 0, OTA_START, OTA_PROG, OTA_OK, OTA_ERR
 };
 
+uint8_t otaSecure_progress();
+
 void otaSecure_begin();                               // call once in setup()
 OTAStatus otaSecure_status();                         // polled by BLE stream
 void otaSecure_trigger(const char* ssid,
