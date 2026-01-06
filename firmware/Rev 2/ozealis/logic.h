@@ -23,7 +23,8 @@ enum FaultType : uint8_t {
   FAULT_NONE = 0,
   FAULT_LOW_VIN,
   FAULT_SENSOR,
-  FAULT_OVERPRESSURE
+  FAULT_OVERPRESSURE,
+  FAULT_IO
 };
 
 // ───── Limits & constants ───────────────────────────────────
@@ -38,5 +39,9 @@ extern FaultType currentFault;
 void runMainLogic();             // call every 50 ms in loop()
 void enterMode(SystemMode m);    // state machine jump
 void triggerFault(FaultType f);  // raises fault & enters MODE_FAULT
+
+const char* modeName(SystemMode m);
+const char* faultName(FaultType f);
+extern FaultType lastFault;
 
 #endif  // LOGIC_H

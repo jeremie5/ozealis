@@ -28,7 +28,9 @@
 #define UUID_CHAR_SETTINGS_RW "00F0"  // JSON settings R/W
 #define UUID_CHAR_OTA_CMD "0007"      // write JSON {ssid,pwd,url}
 #define UUID_CHAR_OTA_ST "0008"       // notify "IDLE|n%|OK|ERR"
+#define UUID_CHAR_FAULTCSV "0022"
 
+extern BLECharacteristic* char_faultCsv;
 extern BLECharacteristic* char_otaSt;
 
 // ─────────────────────────────────────────────

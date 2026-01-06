@@ -7,6 +7,7 @@ void setupBuzzer() {
 }
 
 void buzz(uint16_t ms) {
+  Serial.println("Buzzer: playing");
   digitalWrite(BZR_SIG, HIGH);
   delay(ms);
   digitalWrite(BZR_SIG, LOW);

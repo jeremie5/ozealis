@@ -32,7 +32,8 @@ void setup() {
   setupBuzzer();
   setupButton();
   setupSensors();
-  setupMotor();
+  MotorProfile tune;
+  setupMotor(tune);
   initModules();
   PapLimits limits = { 4.0f, 15.0f, 4.0f, 300, true, true, 3 };  // pMin, pMax, Δ, ramp, autoStart, autoStop, EPR
   papBegin(limits);
@@ -40,6 +41,7 @@ void setup() {
   pinMode(ACC_EN, OUTPUT);
   digitalWrite(ACC_EN, LOW);
   buzz(100);
+  setLED(255, 0, 255);
 }
 
 void loop() {
@@ -47,15 +49,20 @@ void loop() {
   runMainLogic();
   pollButton();
   ledPairingWaveService();
+  motorDebugService();
   static uint32_t lastLog = 0;
   uint32_t now = millis();
-  if (now - lastLog >= 500) {
+  if (now - lastLog >= 2000) {
     lastLog = now;
     float setpoint = papGetSetpointCm();
     float flow = papGetFlowProxy();
     float vin = vinFiltered();
     Serial.print("State: mode=");
-    Serial.print(currentMode);
+    Serial.print(modeName(currentMode));
+    Serial.print(" fault=");
+    Serial.print(faultName(currentFault));
+    Serial.print(" last_fault=");
+    Serial.print(faultName(lastFault));
     Serial.print(" setpoint_cm=");
     Serial.print(setpoint, 2);
     Serial.print(" flow_proxy=");
@@ -63,6 +70,7 @@ void loop() {
     Serial.print(" vin=");
     Serial.print(vin, 2);
     Serial.println(" V");
+    motorDumpPins();
   }
   delay(50);
 }

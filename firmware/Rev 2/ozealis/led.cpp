@@ -28,7 +28,10 @@ void setLED(uint8_t r, uint8_t g, uint8_t b) {
 
 void ledTogglePairingWave(bool on) {
   pairingActive = on;
-  if (!on) setLED(0, 0, 255);  // restore idle blue when stopping
+  if (!on){
+    Serial.println("LED: BT pairing ended, resetting");
+    setLED(0, 0, 255);  // restore idle blue when stopping
+  }
 }
 
 void ledPairingWaveService() {

@@ -1,4 +1,5 @@
 //ble.cpp
+#include "diag.h"
 #include "modules.h"
 #include "ble.h"
 #include "logic.h"  // currentMode / epochOffset / eventFlag
@@ -23,6 +24,8 @@ BLECharacteristic *char_pressure = nullptr, *char_vin = nullptr,
                   *char_ahi = nullptr, *char_liveCsv = nullptr,
                   *char_logDl = nullptr, *char_otaCmd = nullptr,
                   *char_otaSt = nullptr;
+BLECharacteristic* char_faultCsv = nullptr;
+
 
 bool bleConnected = false;
 bool bleActive = false;
@@ -30,6 +33,12 @@ unsigned long bleStartTime = 0;
 
 CPAPSettings settings;  // live copy
 Preferences prefs;      // NVS namespace "cpap"
+
+class FaultLogReadCallback : public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic* c) override {
+    c->setValue(diag_fault_csv().c_str());
+  }
+};
 
 // ================== Settings R/W =================
 void loadSettings() {
@@ -158,6 +167,11 @@ void startBLE() {
   char_liveCsv = svc->createCharacteristic(UUID_CHAR_LIVECSV, BLECharacteristic::PROPERTY_NOTIFY);
 
   char_logDl = svc->createCharacteristic(UUID_CHAR_LOGDL, BLECharacteristic::PROPERTY_READ);
+
+  char_faultCsv = svc->createCharacteristic(UUID_CHAR_FAULTCSV, BLECharacteristic::PROPERTY_READ);
+  char_faultCsv->setCallbacks(new FaultLogReadCallback());
+  char_faultCsv->setValue("");
+
   char_logDl->setCallbacks(new LogReadCallback());
   char_logDl->setValue("");
 

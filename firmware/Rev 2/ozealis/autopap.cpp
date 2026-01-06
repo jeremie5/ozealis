@@ -5,6 +5,7 @@
 static PapLimits limits;  // copy of user config
 static TherapyMode mode = MODE_CPAP;
 
+static float epapBase = 0.0f;   // ramp, autoCPAP, etc
 static float epap_cm = 5.0f;    // current expiratory target
 static float ipap_cm = 9.0f;    // current inspiratory target
 static float flowProxy = 0.0f;  // latest ΔP (hPa)
@@ -72,29 +73,32 @@ void papLoop() {
   if (mode == MODE_CPAP) {
     uint32_t t = millis() - rampStart;
     float frac = limits.rampSecs ? min(1.0f, t / (limits.rampSecs * 1000.0f)) : 1.0f;
-    epap_cm = limits.pMin + frac * (limits.pMax - limits.pMin);
+    epapBase = limits.pMin + frac * (limits.pMax - limits.pMin);
+    epap_cm = epapBase;
   }
 
   /* 4. EPAP / IPAP adjustment by mode */
   switch (mode) {
     case MODE_CPAP:
-      // optional EPR during expiration
-      ipap_cm = epap_cm;
-      if (flowProxy < 0 && limits.epr > 0) epap_cm = max(limits.pMin,
-                                                         epap_cm - limits.epr);
+      // In CPAP the IPAP setpoint equals the baseline (no EPR on inspiration)
+      ipap_cm = epapBase;
+
+      // EPAP lowered only on expiration
+      if (flowProxy < 0 && limits.epr > 0)
+          epap_cm = max(limits.pMin, epapBase - limits.epr);
+      else
+          epap_cm = epapBase;
       break;
 
     case MODE_BIPAP:
       // naive flow‑lim / apnea logic (placeholder)
-      ipap_cm = constrain(epap_cm + limits.delta, limits.pMin,
-                          limits.pMax);
+      ipap_cm = constrain(epap_cm + limits.delta, limits.pMin, limits.pMax);
       break;
 
     case MODE_ASV:
       // simplified ASV: boost IPAP if minute‑vent < 85 %
       // (real ASV needs running MV average — omitted for brevity)
-      ipap_cm = constrain(epap_cm + limits.delta, limits.pMin,
-                          limits.pMax + limits.delta);
+      ipap_cm = constrain(epap_cm + limits.delta, limits.pMin, limits.pMax + limits.delta);
       break;
   }
 

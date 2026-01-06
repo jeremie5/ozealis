@@ -24,14 +24,18 @@ void setupButton() {
 
 // ----‑‑ helpers ------------------------------------------------------
 static void actionShort() {
-  ledTogglePairingWave(false);
-  if (currentMode != MODE_SHUTDOWN)
-    enterMode(MODE_SHUTDOWN);
-  else
-    enterMode(MODE_STARTUP);
+  Serial.println("Button: Short clicked");
+  if (currentMode == MODE_RUNNING || currentMode == MODE_STARTUP) {
+    Serial.println("Button: Triggering shutdown mode");
+    enterMode(MODE_SHUTDOWN);     // stop
+  } else {
+    Serial.println("Button: Triggering startup mode");
+    enterMode(MODE_STARTUP);      // start
+  }
 }
 
 static void actionLong() {
+  Serial.println("Button: Long click");
   // five red blinks then NVS erase + reboot
   for (int i = 0; i < 5; ++i) { setLED(255,0,0); delay(150); setLED(0,0,0); delay(150); }
 
@@ -43,6 +47,7 @@ static void actionLong() {
 }
 
 static void actionTriple() {
+  Serial.println("Button: Triple clicked");
   enterMode(MODE_IDLE); // ensure we’re in idle before pairing
   ledTogglePairingWave(true);
   ensureBleAdvertising();
