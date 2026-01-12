@@ -29,7 +29,7 @@
 #endif
 
 #ifndef DRV8313_IN_HIGH_SELECTS_HIGHSIDE
-# define DRV8313_IN_HIGH_SELECTS_HIGHSIDE 1
+# define DRV8313_IN_HIGH_SELECTS_HIGHSIDE 0
 #endif
 
 /* ---------------------------------------------------------------
@@ -53,32 +53,32 @@ extern volatile uint32_t bemfEdges;   // BEMF edge count
    MotorProfile: tuning knobs for startup, ramp, handoff, rescue
    --------------------------------------------------------------- */
 struct MotorProfile {
-  uint32_t start_pwm_hz     = 4000;
-  uint32_t run_pwm_hz       = 25000;
+  uint32_t start_pwm_hz     = 8000;     // keep bootstrap happy
+  uint32_t run_pwm_hz       = 20000;    // 20k is fine for DRV8313
 
   uint16_t align_ms         = 120;
-  uint8_t  align_mag        = 255;
+  uint8_t  align_mag        = 0;       // was 255 (way too high)
 
-  uint16_t ramp_steps       = 1800;
-  uint16_t ramp_dwell_us0   = 6000;
-  uint16_t ramp_dwell_us1   = 300;
-  uint8_t  ramp_mag0        = 245;
-  uint8_t  ramp_mag1        = 255;
+  uint16_t ramp_steps       = 2000;     // less steps while debugging
+  uint16_t ramp_dwell_us0   = 2500;     // start slower
+  uint16_t ramp_dwell_us1   = 800;      // don't go too fast yet
+  uint8_t  ramp_mag0        = 60;       // was 245
+  uint8_t  ramp_mag1        = 110;       // was 255
 
-  uint16_t handoff_ms       = 300;
-  uint16_t rescue_ms        = 4000;
-  uint8_t  rescue_mag       = 255;
+  uint16_t handoff_ms       = 350;
+  uint16_t rescue_ms        = 2000;
+  uint8_t  rescue_mag       = 50;       // was 255
 
-  uint8_t  trap_floor       = 140;
-  uint8_t  sine_floor       = 100;
-  uint8_t  hold_amp         = 255;
-  uint16_t hold_ms          = 6000;
+  uint8_t  trap_floor       = 0;        // IMPORTANT: allow low current
+  uint8_t  sine_floor       = 0;
+  uint8_t  hold_amp         = 120;
+  uint16_t hold_ms          = 1500;
 
-  uint8_t  start_kick_ms    = 20;
-  uint8_t  multi_align_tries= 6;
+  uint8_t  start_kick_ms    = 0;        // disable kick during bring-up
+  uint8_t  multi_align_tries= 3;
 
-  uint16_t min_zc_us_floor  = 60;
-  uint16_t min_zc_us_ceil   = 300;
+  uint16_t min_zc_us_floor  = 80;
+  uint16_t min_zc_us_ceil   = 400;
 };
 
 /* ---------------------------------------------------------------

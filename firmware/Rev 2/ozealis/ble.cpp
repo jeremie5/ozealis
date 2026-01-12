@@ -144,7 +144,7 @@ void startBLE() {
   }
 
   BLEDevice::init(settings.bleName);
-  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+  //BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
   // BLEDevice::setSecurityAuth(true, true, true);  // not supported, remove or replace if needed
 
   bleServer = BLEDevice::createServer();

@@ -68,6 +68,8 @@ volatile uint32_t bemfEdges = 0;
 /* private state */
 static uint8_t amplitude = 0;  // 0..255 magnitude
 
+static uint32_t g_trap_assist_until = 0;
+
 /* LEDC channel and pin maps: 0=U,1=V,2=W */
 static const ledc_channel_t CHMAP[3] = { EN_CH_U, EN_CH_V, EN_CH_W };
 static const int            ENPIN[3] = { EN_U_PIN, EN_V_PIN, EN_W_PIN };
@@ -144,6 +146,23 @@ static void motorStopInternal() {
   digitalWrite(NSLEEP_PIN, LOW);
 }
 
+static inline void allEN0() {
+  enWrite(0,0); enWrite(1,0); enWrite(2,0);
+}
+
+static inline uint8_t trapStepToAngle(uint8_t step) {
+  // center of each 60° electrical sector (256-angle space)
+  static const uint8_t lut[6] = {
+    21,   // 30°
+    64,   // 90°
+    107,  // 150°
+    149,  // 210°
+    192,  // 270°
+    235   // 330°
+  };
+  return lut[step % 6];
+}
+
 static void motorControlTask(void *arg){
   (void)arg;
   Serial.println("Motor: Control alive");
@@ -152,21 +171,27 @@ static void motorControlTask(void *arg){
 
     // global fault check (latched)
     if (g_drvFault) {
-        g_drvFault = false;   // consume event
+      g_drvFault = false;
 
-        Serial.println("DRV FAULT detected! Forcing motor stop.");
+      // confirm it's actually low for ~1ms
+      bool stableLow = true;
+      for (int i=0; i<20; i++){
+        if (digitalRead(DRV_FAULT_PIN) != LOW) { stableLow = false; break; }
+        delayMicroseconds(50);
+      }
+      if (!stableLow) {
+        // ignore glitch
+        continue;
+      }
 
-        // immediate safe stop using your existing primitive
-        motorStopInternal();
-
-        g_state = MSTATE_IDLE;
-        g_state_init = false;
-        vTaskDelay(pdMS_TO_TICKS(20)); // let the driver settle
-        continue;                      // skip state machine this tick
+      Serial.println("DRV FAULT detected! Forcing motor stop.");
+      motorStopInternal();
+      g_state = MSTATE_IDLE;
+      g_state_init = false;
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
     }
-
     switch (s) {
-
       case MSTATE_IDLE:
         // Nothing to do; sleep a bit
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -175,8 +200,7 @@ static void motorControlTask(void *arg){
       case MSTATE_PREKICK:
         if (!g_state_init) {
           g_state_init = true;
-          // strong kick then drop to align magnitude
-          trapStep(0, 255);
+          trapStep(0, g_prof.align_mag);   // use the low align magnitude
           g_rescue_start_ms = millis();   // reuse as pre-kick timer
         }
         if (millis() - g_rescue_start_ms >= g_prof.start_kick_ms) {
@@ -253,34 +277,50 @@ static void motorControlTask(void *arg){
         vTaskDelay(pdMS_TO_TICKS(1)); // yield to keep WDT happy
         break;
 
-      case MSTATE_BEMF_WAIT:
-        if (!g_state_init) {
-          g_state_init       = true;
-          motorAttachBemf(true);
-          amplitude          = 255;
-          refreshSineVector();
-          g_hold_until       = millis() + g_prof.hold_ms;
-          setPwmFreq(g_prof.run_pwm_hz);
-          g_handoff_start_ms = millis();
-          g_bemf_e0          = bemfEdges;
-        }
+        case MSTATE_BEMF_WAIT:
+          if (!g_state_init) {
+            g_state_init = true;
 
-        if ((bemfEdges - g_bemf_e0) > 5) {
-          // lock acquired
-          g_state      = MSTATE_RUN;
-          g_state_init = false;
+            // stop trap torque fully before handoff
+            allEN0();
+
+            // seed electrical angle from last ramp step
+            elecAngle = trapStepToAngle(g_ramp_step);
+
+            // do NOT slam full amplitude here
+            amplitude = g_prof.ramp_mag1;
+
+            g_trap_assist_until = millis() + 120;   // 120 ms of trap assist
+
+            // allow currents to settle before enabling BEMF
+            motorAttachBemf(false);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            motorAttachBemf(true);
+
+            refreshSineVector();
+
+            g_hold_until       = millis() + g_prof.hold_ms;
+            setPwmFreq(g_prof.run_pwm_hz);
+
+            g_handoff_start_ms = millis();
+            g_bemf_e0          = bemfEdges;
+          }
+
+          if ((bemfEdges - g_bemf_e0) > 20 &&
+              millis() - g_handoff_start_ms > 100) {
+            g_state      = MSTATE_RUN;
+            g_state_init = false;
+            break;
+          }
+
+          if (millis() - g_handoff_start_ms > g_prof.handoff_ms) {
+            g_state      = MSTATE_RESCUE;
+            g_state_init = false;
+            break;
+          }
+
+          vTaskDelay(pdMS_TO_TICKS(5));
           break;
-        }
-
-        if (millis() - g_handoff_start_ms > g_prof.handoff_ms) {
-          // no lock within window → rescue
-          g_state      = MSTATE_RESCUE;
-          g_state_init = false;
-          break;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5));
-        break;
 
       case MSTATE_RESCUE:
         if (!g_state_init) {
@@ -303,7 +343,6 @@ static void motorControlTask(void *arg){
 
         // check for lock using your existing heuristic
         if (motorHasLock()) {
-            amplitude = 255;
             refreshSineVector();
             g_state = MSTATE_RUN;
             g_state_init = false;
@@ -353,6 +392,12 @@ static inline uint32_t enRead(uint8_t ph){
 /* phase driver: select polarity on INx, magnitude on ENx; mag 0 -> float */
 static inline void setPhaseSigned(uint8_t ph, int16_t sVal){
   uint8_t mag = (uint8_t)min<int16_t>(abs(sVal), 255);
+
+  // extra torque only during trap assist window
+  if (millis() < g_trap_assist_until) {
+    if (mag < 80) mag = 80;
+  }
+
   if (!g_running || mag == 0) { enWrite(ph, 0); return; }
 
   // Apply minimums so real current actually flows
@@ -377,17 +422,47 @@ static void refreshSineVector(){
   setPhaseSigned(2, w);
 }
 
-/* 6-step trapezoid (two phases on, one floating) */
-static void trapStep(uint8_t step, uint8_t mag){
+/* 6-step trapezoid (two phases driven, one floating)
+   DRV8313 sign-magnitude safe version */
+static void trapStep(uint8_t step, uint8_t mag) {
+ if (!g_running || mag == 0) return;
+
   g_trapMode = true;
-  switch (step % 6){
-    case 0: g_floatPhase = 2; setPhaseSigned(0, +mag); setPhaseSigned(1, -mag); setPhaseSigned(2, 0); break;
-    case 1: g_floatPhase = 1; setPhaseSigned(0, +mag); setPhaseSigned(1, 0);    setPhaseSigned(2, -mag); break;
-    case 2: g_floatPhase = 0; setPhaseSigned(0, 0);    setPhaseSigned(1, +mag); setPhaseSigned(2, -mag); break;
-    case 3: g_floatPhase = 2; setPhaseSigned(0, -mag); setPhaseSigned(1, +mag); setPhaseSigned(2, 0); break;
-    case 4: g_floatPhase = 1; setPhaseSigned(0, -mag); setPhaseSigned(1, 0);    setPhaseSigned(2, +mag); break;
-    case 5: g_floatPhase = 0; setPhaseSigned(0, 0);    setPhaseSigned(1, -mag); setPhaseSigned(2, +mag); break;
+
+  uint8_t hi=0, lo=1, fl=2;
+  switch (step % 6) {
+    case 0: hi=0; lo=1; fl=2; break; // U+ V-
+    case 1: hi=0; lo=2; fl=1; break; // U+ W-
+    case 2: hi=1; lo=2; fl=0; break; // V+ W-
+    case 3: hi=1; lo=0; fl=2; break; // V+ U-
+    case 4: hi=2; lo=0; fl=1; break; // W+ U-
+    case 5: hi=2; lo=1; fl=0; break; // W+ V-
   }
+  g_floatPhase = fl;
+
+  // 1) Turn PWM off on all phases before changing polarity (prevents braking/shoot-through)
+  enWrite(0, 0); enWrite(1, 0); enWrite(2, 0);
+
+  // 2) Set directions while everything is off
+  drivePolarity(hi, true);    // source
+  drivePolarity(lo, false);   // sink
+  // floating phase ignored
+
+  delayMicroseconds(2);
+
+  // 3) Drive: PWM on hi, FULL ON on lo, float fl
+  enWrite(fl, 0);
+  uint8_t sink = mag;          // same as source
+  if (sink < 80) sink = 80;    // minimum conduction so there is a path
+  if (sink > 140) sink = 140;  // prevent current spikes
+  enWrite(lo, sink);
+  enWrite(hi, mag);
+
+  //Serial.printf("step=%u hi=%u lo=%u fl=%u duty(U,V,W)=(%lu,%lu,%lu)\n",
+  //step%6, hi, lo, fl,
+  //(unsigned long)enRead(0),
+  //(unsigned long)enRead(1),
+  //(unsigned long)enRead(2));
 }
 
 /* LEDC setup */
@@ -543,7 +618,7 @@ bool motorIsStarting(){
 
 /* BEMF advance: +60 electrical deg per edge, ISR very lean */
 void IRAM_ATTR advanceElectricalAngle(){
-  elecAngle += 43;                 // 256 * 60/360
+  elecAngle += 32;                 // 256 * 60/360
   g_commPend = true;
   if (g_commTask){
     BaseType_t hpw = pdFALSE;
@@ -600,18 +675,18 @@ void motorAttachBemf(bool on) {
 
 void startMotor() {
   Serial.println("Motor: Starting");
-
-  if (digitalRead(26) == LOW) {
-      Serial.println("Motor: DRV faulted, refusing to start");
-      return;
+  if (digitalRead(DRV_FAULT_PIN) == LOW) {
+    Serial.println("Motor: DRV faulted, refusing to start");
+    return;
   }
-
-  g_running = true;      
-  g_state = MSTATE_PREKICK;
-  g_state_init = false;
-
-  // wake the driver
+  // wake driver
   digitalWrite(NSLEEP_PIN, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(10));   // give it time (bootstrap etc.)
+  // make sure outputs start disabled
+  enWrite(0,0); enWrite(1,0); enWrite(2,0);
+  g_running = true;
+  g_state = (g_prof.start_kick_ms ? MSTATE_PREKICK : MSTATE_ALIGN);
+  g_state_init = false;
 }
 
 void stopMotor(){

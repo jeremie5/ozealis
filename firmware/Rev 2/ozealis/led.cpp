@@ -4,7 +4,7 @@
 /* ------- user‑configurable ------- */
 #define NUM_LEDS 2
 #define LED_SIG 15
-float brightness = 0.05f;  // exported if you already use it
+float brightness = 0.010f;  // exported if you already use it
 /* --------------------------------- */
 
 NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> led(NUM_LEDS, LED_SIG);
