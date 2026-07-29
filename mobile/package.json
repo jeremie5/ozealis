@@ -1,0 +1,43 @@
+{
+  "name": "ozealis-control",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "buffer": "^6.0.3",
+    "expo": "~56.0.18",
+    "expo-dev-client": "~56.0.24",
+    "expo-file-system": "^56.0.8",
+    "expo-sharing": "^56.0.18",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-ble-plx": "^3.5.1",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "android:dev-build": "expo run:android",
+    "ios:dev-build": "expo run:ios",
+    "web": "expo start --web",
+    "audit:prod": "npm audit --omit=dev",
+    "audit:summary": "node ../scripts/summarize-mobile-audit.mjs",
+    "check:expo": "expo install --check",
+    "test:web-export": "node ../scripts/verify-mobile-web-export.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:validation": "node ../scripts/test-mobile-validation.mjs",
+    "test:plx-oximetry": "node ../scripts/test-mobile-plx-oximetry.mjs",
+    "test:csv-transfer": "node ../scripts/test-mobile-csv-transfer.mjs"
+  },
+  "private": true
+}

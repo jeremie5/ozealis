@@ -17,7 +17,11 @@ struct FaultSnapshot {
   float    diff_hPa;       // blower - mask
   float    setpoint_cm;    // pap setpoint at time of fault
   float    flowProxy_hPa;  // pap flow proxy
-  uint8_t  motorAmp;       // PWM amplitude 0..255
+  uint8_t  motorAmp;       // legacy CSV name; bounded driver command units 0..255
+  uint16_t motorCmd;       // driver command units
+  uint8_t  motorFault;     // motor driver fault latch
+  uint8_t  motorI2c;       // motor driver I2C probe result
+  float    motorFgHz;      // MCF8316D FG tach frequency
   uint16_t loop_us;        // last loop time
   // Sensor-level diagnostics
   uint16_t miss1;          // consecutive misses sensor1
@@ -29,8 +33,19 @@ struct FaultSnapshot {
 void diag_init();                                    // call in setup
 void diag_note_loop_us(uint16_t loop_us);            // call once per loop
 void diag_capture_fault(const FaultSnapshot& s);     // call inside triggerFault
-String diag_fault_csv();                             // read-only CSV
 void diag_clear_faults();                            // clear buffer
+size_t diag_fault_csv_size();
+uint32_t diag_fault_csv_hash();
+uint32_t diag_fault_generation();
+
+struct FaultCsvCursor {
+  size_t headerOffset;
+  size_t rowIndex;
+  size_t rowOffset;
+};
+
+void diag_begin_fault_csv_read(FaultCsvCursor& cursor);
+size_t diag_read_next_fault_csv_chunk(FaultCsvCursor& cursor, char* out, size_t maxBytes);
 
 // Sensor-layer taps - implemented in sensor.cpp
 void sensorDiagGet(uint16_t& miss1, uint16_t& miss2, int8_t& err1, int8_t& err2);

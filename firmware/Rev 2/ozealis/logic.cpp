@@ -1,59 +1,37 @@
-// ========================= logic.cpp =========================
-#ifndef LOGIC_H
-#define LOGIC_H
-
-#include <Arduino.h>
-#include <deque>
-#include "sensor.h"
-#include "ble.h"
-#include "diag.h"
-
-// ───── System‑level machine states (NOT therapy) ────────────
-enum SystemMode : uint8_t {
-  MODE_IDLE = 0,
-  MODE_STARTUP,
-  MODE_RUNNING,
-  MODE_SHUTDOWN,
-  MODE_FAULT
-};
-
-// ───── Fault codes ──────────────────────────────────────────
-enum FaultType : uint8_t {
-  FAULT_NONE = 0,
-  FAULT_LOW_VIN,
-  FAULT_SENSOR,
-  FAULT_OVERPRESSURE,
-  FAULT_IO
-};
-
-static uint32_t lastTick = 0;
-
-// ───── Limits & constants ───────────────────────────────────
-constexpr uint32_t BLE_TIMEOUT_MS = 30'000;     // 30 s
-constexpr float MAX_MASK_PRESSURE_HPA = 30.0f;  // ≈12 cm H₂O
-
-// ───── Globals exposed to other units ───────────────────────
-extern SystemMode currentMode;
-extern FaultType currentFault;
-
-// ───── API ─────────────────────────────────────────────────
-void runMainLogic();             // call every 50 ms in loop()
-void enterMode(SystemMode m);    // state machine jump
-void triggerFault(FaultType f);  // raises fault & enters MODE_FAULT
-
-#endif  // LOGIC_H
-
 // ========================= logic.cpp ========================
 #include "logic.h"
 #include "autopap.h"  // therapy & motor control lives here
-#include "motor.h"    // restartMotor(), setMotorAmplitude()
+#include "motor.h"
 #include "buzzer.h"
 #include "led.h"
 #include "button.h"
+#include "datalog.h"
+#include "diag.h"
+#include "modules.h"
+#include "motor_calibration.h"
+#include "oximetry.h"
+#include "ota_secure.h"
 #include <BLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <stdlib.h>
+
+#ifndef OZEALIS_LOGIC_SERIAL_LOG
+#define OZEALIS_LOGIC_SERIAL_LOG 0
+#endif
+
+#if OZEALIS_LOGIC_SERIAL_LOG
+#define LOGIC_LOG(message) Serial.println(message)
+#else
+#define LOGIC_LOG(message) do { } while (0)
+#endif
+
+static uint32_t lastTick = 0;
+static uint32_t lastLogMs = 0;
+static volatile bool statusLedRefreshPending = false;
+static SemaphoreHandle_t systemControlMutex = nullptr;
 
 // -------- External symbols provided by BLE unit ------------
-extern BLECharacteristic *char_liveCsv;
 extern bool bleActive;
 extern unsigned long bleStartTime;
 extern void sendBLEEvent(const char *evt);
@@ -63,11 +41,33 @@ static constexpr float VIN_TRIP_V = 9.8f;
 static constexpr float VIN_RECOVER_V = 10.3f;
 static constexpr uint16_t VIN_TRIP_MS = 200;
 static uint32_t vinLowSince = 0;
+static bool humidifierPrewarmOn = false;
+static uint32_t humidifierPrewarmUntilMs = 0;
 
 // -------- Global machine state -----------------------------
 SystemMode currentMode = MODE_IDLE;
 FaultType currentFault = FAULT_NONE;
 FaultType lastFault = FAULT_NONE;
+
+void systemControlInit() {
+  if (systemControlMutex) return;
+  systemControlMutex = xSemaphoreCreateRecursiveMutex();
+  if (!systemControlMutex) abort();
+}
+
+void systemControlLock() {
+  if (!systemControlMutex ||
+      xSemaphoreTakeRecursive(systemControlMutex, portMAX_DELAY) != pdTRUE) {
+    abort();
+  }
+}
+
+void systemControlUnlock() {
+  if (!systemControlMutex ||
+      xSemaphoreGiveRecursive(systemControlMutex) != pdTRUE) {
+    abort();
+  }
+}
 
 // -------- Local helpers ------------------------------------
 static void alarmBeep(uint8_t n) {
@@ -75,6 +75,10 @@ static void alarmBeep(uint8_t n) {
     buzz(80);
     delay(120);
   }
+}
+
+static float finiteOrNan(float value) {
+  return isfinite(value) ? value : NAN;
 }
 
 const char* modeName(SystemMode m){
@@ -99,32 +103,104 @@ const char* faultName(FaultType f){
   }
 }
 
+static void applySystemStatusLed() {
+  switch (currentMode) {
+    case MODE_IDLE: setLED(0, 0, 255); break;
+    case MODE_STARTUP: setLED(255, 255, 0); break;
+    case MODE_RUNNING: setLED(0, 255, 0); break;
+    case MODE_SHUTDOWN: setLED(255, 150, 0); break;
+    case MODE_FAULT: setLED(255, 0, 0); break;
+  }
+}
+
+void refreshSystemStatusLed() {
+  // BLE callbacks run outside the Arduino loop task. Defer the shared pixel
+  // buffer and RMT write to the main loop instead of touching them cross-task.
+  statusLedRefreshPending = true;
+}
+
+bool humidifierPrewarmActive() {
+  if (!humidifierPrewarmOn) return false;
+  if (settings.humidifierKind != 2 || settings.humidifierPrewarmMinutes == 0 ||
+      currentMode != MODE_IDLE || currentFault != FAULT_NONE || motorCalIsActive() ||
+      otaSecure_inProgress() || !humid.present || !humid.ready || !humidifierTelemetryFresh()) {
+    humidifierPrewarmStop();
+    return false;
+  }
+  if ((int32_t)(millis() - humidifierPrewarmUntilMs) >= 0) {
+    humidifierPrewarmStop();
+    return false;
+  }
+  return true;
+}
+
+bool humidifierPrewarmStart() {
+  if (currentMode != MODE_IDLE || currentFault != FAULT_NONE || motorCalIsActive() ||
+      otaSecure_inProgress()) return false;
+  if (settings.humidifierKind != 2 || settings.humidifierPrewarmMinutes == 0) return false;
+  if (!humid.present || !humid.ready || !humidifierTelemetryFresh()) return false;
+  humidifierPrewarmOn = true;
+  humid.prewarm = true;
+  humidifierPrewarmUntilMs = millis() + (uint32_t)settings.humidifierPrewarmMinutes * 60000UL;
+  return true;
+}
+
+void humidifierPrewarmStop() {
+  humidifierPrewarmOn = false;
+  humidifierPrewarmUntilMs = 0;
+  humid.prewarm = false;
+}
+
 // -----------------------------------------------------------
 void triggerFault(FaultType f) {
   if (currentFault == f && currentMode == MODE_FAULT) return;
 
   lastFault = f;
+  currentFault = f;
 
-  // Build snapshot
+  // Remove motor power through the dedicated hardware pin before any I2C,
+  // sensor, BLE, logging, or UI work. Preserve the already-cached command
+  // values for the snapshot because normal shutdown clears them.
+  motorEmergencyDisable();
+  const uint8_t faultMotorAmp = motorGetAmplitude();
+  const uint16_t faultMotorCommand = motorGetCommand();
+  const float faultSetpointCm = finiteOrNan(papGetSetpointCm());
+  const float faultFlowProxy = finiteOrNan(papGetFlowProxy());
+
+  if (motorCalIsActive()) motorCalAbort();
+  humidifierPrewarmStop();
+  enterMode(MODE_FAULT);
+
+  // Build a best-effort snapshot only after the fault is latched and the
+  // hardware drive is disabled.
   float pMask = NAN, pBlower = NAN;
-  readPressures(pMask, pBlower); // use cached fallback if needed
-  const float diff = (isnan(pMask) || isnan(pBlower)) ? NAN : (pBlower - pMask);
+  const bool pressureComplete = readPressures(pMask, pBlower);
+  if (!pressureComplete) {
+    pMask = NAN;
+    pBlower = NAN;
+  }
+  pMask = finiteOrNan(pMask);
+  pBlower = finiteOrNan(pBlower);
+  const float diff = (isfinite(pMask) && isfinite(pBlower)) ? (pBlower - pMask) : NAN;
   FaultSnapshot snap{};
   snap.ts_ms        = millis();
-  snap.sys_mode     = (uint8_t)currentMode;
+  snap.sys_mode     = (uint8_t)MODE_FAULT;
   snap.fault_code   = (uint8_t)f;
-  snap.vin_V        = vinFiltered();
+  snap.vin_V        = finiteOrNan(vinFiltered());
   snap.pMask_hPa    = pMask;
   snap.pBlower_hPa  = pBlower;
-  snap.ambient_hPa  = sensorAmbient_hPa();
-  snap.diff_hPa     = diff;
-  snap.setpoint_cm  = papGetSetpointCm();
-  snap.flowProxy_hPa= papGetFlowProxy();
-  snap.motorAmp     = motorGetAmplitude();
+  snap.ambient_hPa  = finiteOrNan(sensorAmbient_hPa());
+  snap.diff_hPa     = finiteOrNan(diff);
+  snap.setpoint_cm  = faultSetpointCm;
+  snap.flowProxy_hPa= faultFlowProxy;
+  snap.motorAmp     = faultMotorAmp;
+  snap.motorCmd     = faultMotorCommand;
+  snap.motorFault   = motorFaultActive() ? 1 : 0;
+  snap.motorI2c     = motorDriverI2cPresent() ? 1 : 0;
+  snap.motorFgHz    = finiteOrNan(motorGetFgHz());
   sensorDiagGet(snap.miss1, snap.miss2, snap.i2cErr1, snap.i2cErr2);
   diag_capture_fault(snap);  // log it
 
-  currentFault = f;
   sendBLEEvent("FAULT");
 
   switch (f) {
@@ -133,35 +209,51 @@ void triggerFault(FaultType f) {
     case FAULT_OVERPRESSURE: alarmBeep(5); break;
     default: alarmBeep(1); break;
   }
-  enterMode(MODE_FAULT);
 }
 
 // -----------------------------------------------------------
 void enterMode(SystemMode m) {
   // Allow STARTUP to transition to RUNNING even if we "think" we are already running
   if (m != MODE_STARTUP && currentMode == m) return;
+  if ((m == MODE_STARTUP || m == MODE_RUNNING) && otaSecure_inProgress()) return;
 
   currentMode = m;
+  ledTogglePairingWave(false);
 
   switch (m) {
     case MODE_IDLE:
+      papStopSession();
       motorSetDriveEnabled(false);   // stop + sleep driver
       setLED(0, 0, 255);             // blue
       break;
 
     case MODE_STARTUP:
-      // Transitional alias: request motor start and immediately treat as RUNNING
+      humidifierPrewarmStop();
       setLED(255, 255, 0);           // yellow for "starting"
-      motorSetDriveEnabled(true);    // schedules non-blocking startMotor()
-      currentMode = MODE_RUNNING;    // logical mode = RUNNING
+      motorSetDriveEnabled(true);
+      if (!motorIsRunning()) {
+        currentMode = MODE_IDLE;
+        triggerFault(FAULT_IO);
+        break;
+      }
+      enterMode(MODE_RUNNING);
       break;
 
     case MODE_RUNNING:
+      humidifierPrewarmStop();
       setLED(0, 255, 0);             // green
       motorSetDriveEnabled(true);    // ensure motor is commanded ON
+      if (!motorIsRunning()) {
+        currentMode = MODE_IDLE;
+        triggerFault(FAULT_IO);
+        break;
+      }
+      papStartSession();
       break;
 
     case MODE_SHUTDOWN:
+      humidifierPrewarmStop();
+      papStopSession();
       setLED(255, 150, 0);           // orange
       motorSetDriveEnabled(false);
       delay(500);                    // ok, this is UI-level, not in motor code
@@ -169,6 +261,8 @@ void enterMode(SystemMode m) {
       break;
 
     case MODE_FAULT:
+      humidifierPrewarmStop();
+      papStopSession();
       motorSetDriveEnabled(false);
       setLED(255, 0, 0);             // red
       break;
@@ -177,6 +271,18 @@ void enterMode(SystemMode m) {
 
 // -----------------------------------------------------------
 void runMainLogic() {
+  if (statusLedRefreshPending) {
+    statusLedRefreshPending = false;
+    applySystemStatusLed();
+  }
+
+  if (otaSecure_inProgress()) {
+    if (motorCalIsActive()) motorCalAbort();
+    if (papSessionActive()) papStopSession();
+    if (motorIsRunning()) motorSetDriveEnabled(false);
+    humidifierPrewarmStop();
+  }
+
   /* 0. VIN MONITOR -------------------------------------------------- */
   float vin = vinFiltered();
   if (currentMode != MODE_FAULT) {
@@ -184,90 +290,145 @@ void runMainLogic() {
       if (!vinLowSince) vinLowSince = millis();
       if (millis() - vinLowSince > VIN_TRIP_MS){
         triggerFault(FAULT_LOW_VIN);
-        Serial.println("VIN fault detected");
+        LOGIC_LOG("VIN fault detected");
       }
     } else {
       vinLowSince = 0;
     }
   } else if (currentFault == FAULT_LOW_VIN && vin > VIN_RECOVER_V) {
-    Serial.println("Low VIN Fault has recovered, entering idle");
+    LOGIC_LOG("Low VIN Fault has recovered, entering idle");
     currentFault = FAULT_NONE;              // clear latched fault
     enterMode(MODE_IDLE);
+    sendBLEEvent("VIN_RECOVER");
   }  
 
-  // If we're "running" but not spinning, kick a start
-  static uint32_t lastKick = 0;
-  if (currentMode == MODE_RUNNING && !motorIsStarting()) {
-    // consider "not spinning" if edge rate is near zero
-    static uint32_t lastE = 0, lastT = 0;
-    uint32_t now = millis();
-    if (now - lastT >= 300) {
-      uint32_t dE = bemfEdges - lastE;
-      lastE = bemfEdges; lastT = now;
-      if (dE < 10 && now - lastKick > 2000) {    // hardly any edges
-        restartMotor();
-        lastKick = now;
-      }
-    }
+  if (currentMode != MODE_FAULT && motorFaultActive()) {
+    LOGIC_LOG("Motor driver fault detected");
+    triggerFault(FAULT_IO);
+    return;
   }
 
   /* 1. SENSOR HEALTH ------------------------------------------------ */
-  if (!sensorsOK()) {
-    Serial.println("Sensor fault detected");
+  if (currentMode != MODE_FAULT && !sensorsOK()) {
+    LOGIC_LOG("Sensor fault detected");
     triggerFault(FAULT_SENSOR);
     return;
   }
 
   /* 2. PRESSURE ACQUISITION ---------------------------------------- */
-  float pMask, pBlower;
-  readPressures(pMask, pBlower);
-  float diff_hPa = pBlower - pMask;
-
-  // Choose a gauge limit, for example 25 cmH2O safety ceiling
-  constexpr float MAX_MASK_CM = 25.0f;
+  float pMask = NAN, pBlower = NAN;
+  const bool pressureComplete = readPressures(pMask, pBlower);
+  const float diff_hPa = pressureComplete ? (pBlower - pMask) : NAN;
 
   float maskGauge_hPa = NAN;
-  if (isfinite(sensorAmbient_hPa())) {
+  if (pressureComplete && isfinite(sensorAmbient_hPa())) {
     maskGauge_hPa = pMask - sensorAmbient_hPa();
   }
 
   // Update ambient estimate using this loop's readings
-  sensorUpdateAmbientEstimate(pMask, diff_hPa);
+  if (pressureComplete) sensorUpdateAmbientEstimate(pMask, diff_hPa);
 
   // Trip only if we have a valid gauge estimate
-  if (isfinite(maskGauge_hPa)) {
-    if (maskGauge_hPa > cmH2O_to_hPa(MAX_MASK_CM)) {
+  if (currentMode != MODE_FAULT && isfinite(maskGauge_hPa)) {
+    if (maskGauge_hPa > cmH2O_to_hPa(MAX_MASK_PRESSURE_CM)) {
       triggerFault(FAULT_OVERPRESSURE);
       return;
     }
   }
 
   /* 3. DELEGATE TO AutoPAP (handles motor) */
-  if (currentMode == MODE_RUNNING) {
-    motorTrapKeepalive(1200, 200);   // ~833 Hz electrical, healthy capture
-    papLoop();                       // sine writes are suppressed while trap is active
+  if (motorCalIsActive()) {
+    if (!motorDriverReady()) {
+      LOGIC_LOG("Motor calibration driver fault detected");
+      triggerFault(FAULT_IO);
+      return;
+    }
+    motorCalService();
+  } else if (currentMode == MODE_RUNNING) {
+    papLoop();
+    if (!papSessionActive()) enterMode(MODE_IDLE);
   } else {
     motorSetDriveEnabled(false);
   }
 
-  /* 4. BASIC BLE STREAM (mask press & VIN) ------------------------- */
-  if (bleActive && char_liveCsv) {
-    static uint32_t lastBle = 0;
-    if (millis() - lastBle >= 1000) {
-      char buf[48];
-      snprintf(buf, sizeof(buf), "%.2f,%.2f", pMask, vin);
-      char_liveCsv->setValue(buf);
-      char_liveCsv->notify();
-      lastBle = millis();
+  if ((currentMode == MODE_RUNNING || motorCalIsActive()) && millis() - lastLogMs >= 1000) {
+    const bool calibrationActive = motorCalIsActive();
+    const float measured_cm = isfinite(maskGauge_hPa) ? hPa_to_cmH2O(maskGauge_hPa) : NAN;
+    const float setpoint_cm = calibrationActive ? motorCalLogTargetCm() : papGetSetpointCm();
+    const float error_cm = isfinite(measured_cm) ? (setpoint_cm - measured_cm) : NAN;
+    const float flowProxy = calibrationActive ? diff_hPa : papGetFlowProxy();
+    const float controllerError = calibrationActive ? error_cm : papGetPressureErrorCm();
+    const uint8_t controllerAmp = calibrationActive ? motorGetAmplitude() : papGetCommandedAmp();
+    const float motorFgHz = motorGetFgHz();
+    const OximetrySample ox = oximetryGetSample();
+    const bool oxValid = ox.present && isfinite(ox.spo2Percent) && isfinite(ox.pulseBpm);
+    if (isfinite(setpoint_cm) && isfinite(measured_cm) && isfinite(error_cm) && isfinite(flowProxy) &&
+        isfinite(controllerError) && isfinite(motorFgHz)) {
+      char line[220];
+      char spo2Text[12] = "NAN";
+      char pulseText[12] = "NAN";
+      char humidTempText[12] = "NAN";
+      char humidRhText[12] = "NAN";
+      char hoseTempText[12] = "NAN";
+      if (oxValid) {
+        snprintf(spo2Text, sizeof(spo2Text), "%.1f", ox.spo2Percent);
+        snprintf(pulseText, sizeof(pulseText), "%.1f", ox.pulseBpm);
+      }
+      if (humid.present && isfinite(humid.temp_C) && isfinite(humid.rh_percent)) {
+        snprintf(humidTempText, sizeof(humidTempText), "%.1f", humid.temp_C);
+        snprintf(humidRhText, sizeof(humidRhText), "%.1f", humid.rh_percent);
+      }
+      if (hose.present && isfinite(hose.temp_C)) {
+        snprintf(hoseTempText, sizeof(hoseTempText), "%.1f", hose.temp_C);
+      }
+      snprintf(line, sizeof(line), "%lu,%.2f,%.2f,%.2f,%.2f,%u,%.2f,%u,%u,%u,%u,%.2f,%s,%s,%u,%s,%s,%s",
+               (unsigned long)millis(),
+               setpoint_cm,
+               measured_cm,
+               error_cm,
+               flowProxy,
+               (unsigned)motorGetAmplitude(),
+               controllerError,
+               (unsigned)controllerAmp,
+               (unsigned)motorGetCommand(),
+               motorFaultActive() ? 1 : 0,
+               motorDriverI2cPresent() ? 1 : 0,
+               motorFgHz,
+               spo2Text,
+               pulseText,
+               oxValid ? (unsigned)ox.source : 0,
+               humidTempText,
+               humidRhText,
+               hoseTempText);
+      dl_push(line);
     }
+    lastLogMs = millis();
   }
 
+  /* 4. ACCESSORY + BLE TELEMETRY ----------------------------------- */
+  const bool prewarmActive = humidifierPrewarmActive();
+  HumidifierControl humidifierControl;
+  humidifierControl.enabled = (currentMode == MODE_RUNNING && settings.humidifierKind != 0) || prewarmActive;
+  humidifierControl.prewarm = prewarmActive;
+  humidifierControl.kind = prewarmActive ? 2 : settings.humidifierKind;
+  humidifierControl.targetRH = settings.humidifierTargetRH;
+  humidifierControl.maxTempC = settings.humidifierMaxTempC;
+  const float hoseTargetDeltaC = currentMode == MODE_RUNNING ? settings.hoseTempDeltaC : 0.0f;
+  pollModules(humidifierControl, hoseTargetDeltaC);
+  updateBLEStream(diff_hPa,
+                  papGetFlowProxy(),
+                  cmH2O_to_hPa(papGetSetpointCm()),
+                  vin,
+                  0.0f,
+                  humid,
+                  hose);
+
   /* 5. BLE ADVERTISING TIMEOUT ------------------------------------ */
-  if (bleActive && millis() - bleStartTime > BLE_TIMEOUT_MS) {
+  if (bleActive && !bleConnected && millis() - bleStartTime > BLE_TIMEOUT_MS) {
     BLEDevice::getAdvertising()->stop();
     bleActive = false;
     ledTogglePairingWave(false);   // stop animation
-    enterMode(MODE_IDLE);
+    refreshSystemStatusLed();
   }
 
   uint32_t now_us = micros();

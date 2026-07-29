@@ -1,26 +1,31 @@
-### 🧽 **Printed Part Finishing (for Breathing Path)**
+# Printed Part Finishing Notes
 
-To ensure hygiene, airflow quality, and durability:
+These notes are experimental build guidance, not a validated hygiene or safety procedure.
 
-1. 🔥 **Deburr internal air paths**
-   Use a lighter or mini butane torch to quickly pass over the interior surface for **1–2 seconds**.
-   This melts loose strings and reduces fuzz.
-   ⚠️ *Keep the flame moving — do not burn or deform the TPU.*
+For any part in or near an airflow path:
 
-2. 🖌️ **Seal with aquarium-safe silicone**
-   Using a small brush or gloved finger, apply a **thin coat** of **aquarium-safe RTV silicone** (e.g. GE Silicone I, Dow 732) to:
+1. Inspect and deburr internal surfaces.
+   - Remove strings, loose filament, dust, and sharp edges.
+   - Do not leave loose plastic fragments inside airflow paths.
 
-   * The **entire internal breathing path**
-   * Any **TPU joints that may flex under airflow**
-   * Optionally, the **electronics PCB** to act as a conformal coating replacement
+2. Avoid heat damage.
+   - If using brief heat to reduce stringing, keep the heat source moving and test on scrap first.
+   - Do not burn, char, warp, or gloss airflow surfaces.
+   - Discard parts that deform or produce residue.
 
-3. ⏳ **Let cure for 24 hours**
-   Place parts in a well-ventilated area. Do **not** install or operate before fully cured.
+3. Consider sealing only after material review.
+   - Any coating, silicone, adhesive, conformal coating, or sealant must be evaluated for curing, off-gassing, adhesion, cleaning, and temperature behavior.
+   - Do not assume "aquarium safe" means safe for breathing exposure.
+   - Do not operate sealed parts until fully cured according to the material data sheet and independently inspected.
 
----
+4. Keep electronics protection separate from airflow decisions.
+   - PCB conformal coating choices should be made for electronics reliability.
+   - Do not coat electronics with materials that can trap heat, interfere with connectors, or enter the airflow path.
 
-### ✅ Notes:
+5. Document the exact process.
+   - Material brand and lot.
+   - Cure time and conditions.
+   - Printer material, nozzle size, layer height, and post-processing method.
+   - Any smell, residue, cracking, peeling, or dimensional change.
 
-* This ensures **no stringing, no loose microplastics**, and a **cleanable, sterile inner wall**.
-* RTV silicones are flexible and adhere to TPU well without cracking.
-* Brushing it over the PCB is an effective conformal coating replacement, if avoiding spray-on types.
+Stop testing if a part sheds material, smells unusual, changes shape, blocks airflow, or cannot be cleaned.

@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "reviewed": "2026-07-29",
+  "command": "npm audit --omit=dev --json",
+  "counts": {
+    "info": 0,
+    "low": 0,
+    "moderate": 11,
+    "high": 0,
+    "critical": 0,
+    "total": 11
+  },
+  "vulnerabilities": [
+    {
+      "name": "@expo/cli",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config",
+        "@expo/config-plugins",
+        "@expo/inline-modules",
+        "@expo/metro-config",
+        "@expo/prebuild-config"
+      ]
+    },
+    {
+      "name": "@expo/config",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config-plugins"
+      ]
+    },
+    {
+      "name": "@expo/config-plugins",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "xcode"
+      ]
+    },
+    {
+      "name": "@expo/inline-modules",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config-plugins"
+      ]
+    },
+    {
+      "name": "@expo/local-build-cache-provider",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config"
+      ]
+    },
+    {
+      "name": "@expo/metro-config",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config"
+      ]
+    },
+    {
+      "name": "@expo/prebuild-config",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "@expo/config",
+        "@expo/config-plugins"
+      ]
+    },
+    {
+      "name": "expo",
+      "severity": "moderate",
+      "direct": true,
+      "via": [
+        "@expo/cli",
+        "@expo/config",
+        "@expo/config-plugins",
+        "@expo/local-build-cache-provider",
+        "@expo/metro-config"
+      ]
+    },
+    {
+      "name": "expo-sharing",
+      "severity": "moderate",
+      "direct": true,
+      "via": [
+        "@expo/config-plugins"
+      ]
+    },
+    {
+      "name": "uuid",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "GHSA-w5hq-g745-h8pq"
+      ]
+    },
+    {
+      "name": "xcode",
+      "severity": "moderate",
+      "direct": false,
+      "via": [
+        "uuid"
+      ]
+    }
+  ]
+}

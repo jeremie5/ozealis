@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mobile-and-protocol:
+    name: Mobile and protocol
+    runs-on: ubuntu-latest
+    env:
+      EXPO_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Verify BLE protocol contract
+        run: node scripts/verify-protocol.mjs
+      - name: Verify release text
+        run: node scripts/verify-release-text.mjs
+      - name: Verify documentation links
+        run: node scripts/verify-doc-links.mjs
+      - name: Verify mobile Simple-mode copy
+        run: node scripts/verify-mobile-simple-copy.mjs
+      - name: Install mobile dependencies
+        working-directory: mobile
+        run: npm ci --ignore-scripts
+      - name: Check Expo dependency compatibility
+        working-directory: mobile
+        run: npm run check:expo
+      - name: Summarize production dependency audit
+        working-directory: mobile
+        run: npm run audit:summary
+      - name: Test mobile validation helpers
+        working-directory: mobile
+        run: npm run test:validation
+      - name: Test mobile retained CSV transfer
+        working-directory: mobile
+        run: npm run test:csv-transfer
+      - name: Test mobile PLX oximetry parser
+        working-directory: mobile
+        run: npm run test:plx-oximetry
+      - name: Typecheck mobile app
+        working-directory: mobile
+        run: npm run typecheck
+      - name: Smoke test mobile web preview bundle
+        working-directory: mobile
+        run: npm run test:web-export
+      - name: Verify repository hygiene after mobile export smoke
+        run: node scripts/verify-repo-hygiene.mjs
+
+  firmware:
+    name: Firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade -r requirements-ci.txt
+      - name: Build firmware
+        run: python -m platformio run -d "firmware/Rev 2" -e esp32dev
+      - name: Build explicit bench PWM firmware
+        run: python -m platformio run -d "firmware/Rev 2" -e esp32dev_bench_pwm
+      - name: Check firmware flash budget
+        run: node scripts/check-firmware-size.mjs
+      - name: Verify repository hygiene
+        run: node scripts/verify-repo-hygiene.mjs
