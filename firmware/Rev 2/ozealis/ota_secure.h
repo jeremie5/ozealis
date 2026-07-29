@@ -10,6 +10,8 @@ uint8_t otaSecure_progress();
 
 void otaSecure_begin();                               // call once in setup()
 OTAStatus otaSecure_status();                         // polled by BLE stream
+bool otaSecure_inProgress();                          // global motor/settings interlock
+void otaSecure_markError();                           // rejected BLE OTA command
 void otaSecure_trigger(const char* ssid,
                        const char* pass,
                        const char* url);              // called from BLE CB

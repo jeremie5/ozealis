@@ -5,140 +5,85 @@
 #include <driver/ledc.h>
 
 /* ---------------------------------------------------------------
-   DRV8313 PIN MAP (Ozealis Rev2)
+   MCF8316D COMMAND PIN MAP
    --------------------------------------------------------------- */
-#define EN_U_PIN   19    // PWM EN1
-#define EN_V_PIN   18    // PWM EN2
-#define EN_W_PIN    5    // PWM EN3
-
-#define IN_U_PIN   12    // direction select 1
-#define IN_V_PIN   14    // direction select 2
-#define IN_W_PIN   13    // direction select 3
-
-#define NSLEEP_PIN  17    // DRV8313 nSLEEP
-
-#define BEMF_U_IN  32    // LM339 outputs
-#define BEMF_V_IN  33
-#define BEMF_W_IN  25
-
-#define DRV_FAULT_PIN 26   // nFAULT, active low
-
-/* Select internal pull-ups ONLY for Rev1 bring-up */
-#ifndef BEMF_INTERNAL_PULLUP
-# define BEMF_INTERNAL_PULLUP 0
+#ifndef MOTOR_SPEED_PWM_PIN
+# define MOTOR_SPEED_PWM_PIN 19
 #endif
 
-#ifndef DRV8313_IN_HIGH_SELECTS_HIGHSIDE
-# define DRV8313_IN_HIGH_SELECTS_HIGHSIDE 0
+#ifndef MCF_DRVOFF_PIN
+# define MCF_DRVOFF_PIN 17
+#endif
+
+#ifndef MCF_NFAULT_PIN
+# define MCF_NFAULT_PIN 26
+#endif
+
+#ifndef MCF_FG_PIN
+# define MCF_FG_PIN 33
+#endif
+
+#ifndef MCF_I2C_ADDR
+# define MCF_I2C_ADDR 0x01
+#endif
+
+#ifndef OZEALIS_BENCH_PWM_SPEED_FALLBACK
+# define OZEALIS_BENCH_PWM_SPEED_FALLBACK 0
+#endif
+
+#ifndef OZEALIS_MCF8316D_I2C_SPEED
+# define OZEALIS_MCF8316D_I2C_SPEED 1
+#endif
+
+#ifndef MCF_I2C_TRANSACTION_HZ
+# define MCF_I2C_TRANSACTION_HZ 10000
+#endif
+
+#ifndef OZEALIS_WIRE_DEFAULT_HZ
+# define OZEALIS_WIRE_DEFAULT_HZ 100000
 #endif
 
 /* ---------------------------------------------------------------
    LEDC CONFIG
    --------------------------------------------------------------- */
-constexpr uint8_t        PWM_BITS  = 8;
-constexpr ledc_mode_t    PWM_MODE  = LEDC_LOW_SPEED_MODE;
-constexpr ledc_timer_t   PWM_TIMER = LEDC_TIMER_0;
+constexpr uint8_t        MOTOR_PWM_BITS  = 8;
+constexpr ledc_mode_t    MOTOR_PWM_MODE  = LEDC_LOW_SPEED_MODE;
+constexpr ledc_timer_t   MOTOR_PWM_TIMER = LEDC_TIMER_0;
+constexpr ledc_channel_t MOTOR_SPEED_CH  = LEDC_CHANNEL_0;
 
-constexpr ledc_channel_t EN_CH_U = LEDC_CHANNEL_0;
-constexpr ledc_channel_t EN_CH_V = LEDC_CHANNEL_1;
-constexpr ledc_channel_t EN_CH_W = LEDC_CHANNEL_2;
-
-/* ---------------------------------------------------------------
-   PUBLIC MOTOR STATE (minimal + safe to read)
-   --------------------------------------------------------------- */
-extern volatile uint16_t elecAngle;   // 0..255 electrical angle
-extern volatile uint32_t bemfEdges;   // BEMF edge count
-
-/* ---------------------------------------------------------------
-   MotorProfile: tuning knobs for startup, ramp, handoff, rescue
-   --------------------------------------------------------------- */
 struct MotorProfile {
-  uint32_t start_pwm_hz     = 8000;     // keep bootstrap happy
-  uint32_t run_pwm_hz       = 20000;    // 20k is fine for DRV8313
-
-  uint16_t align_ms         = 120;
-  uint8_t  align_mag        = 0;       // was 255 (way too high)
-
-  uint16_t ramp_steps       = 2000;     // less steps while debugging
-  uint16_t ramp_dwell_us0   = 2500;     // start slower
-  uint16_t ramp_dwell_us1   = 800;      // don't go too fast yet
-  uint8_t  ramp_mag0        = 60;       // was 245
-  uint8_t  ramp_mag1        = 110;       // was 255
-
-  uint16_t handoff_ms       = 350;
-  uint16_t rescue_ms        = 2000;
-  uint8_t  rescue_mag       = 50;       // was 255
-
-  uint8_t  trap_floor       = 0;        // IMPORTANT: allow low current
-  uint8_t  sine_floor       = 0;
-  uint8_t  hold_amp         = 120;
-  uint16_t hold_ms          = 1500;
-
-  uint8_t  start_kick_ms    = 0;        // disable kick during bring-up
-  uint8_t  multi_align_tries= 3;
-
-  uint16_t min_zc_us_floor  = 80;
-  uint16_t min_zc_us_ceil   = 400;
+  uint32_t command_pwm_hz = 25000;
 };
 
-/* ---------------------------------------------------------------
-   PUBLIC API
-   --------------------------------------------------------------- */
-
-// Initialize driver pins, LEDC, tasks
 void setupMotor(const MotorProfile& prof = MotorProfile{});
-
-// Non-blocking start (handled by control task)
 void startMotor();
-
-// Fully stop and sleep driver
+// Immediately assert the hardware disable pin without waiting for I2C.
+// Fault handling uses this before any best-effort diagnostic work.
+void motorEmergencyDisable();
 void stopMotor();
 
-// Set target amplitude in sine-commutation mode
 void setMotorAmplitude(uint8_t amp);
 uint8_t motorGetAmplitude();
+uint16_t motorGetCommand();
+float motorGetFgHz();
 
-// Running = driver awake AND motor not idle (may still be ramping)
 bool motorIsRunning();
-
-// Starting = in PREKICK / ALIGN / RAMP / BEMF_WAIT / RESCUE
 bool motorIsStarting();
-
-// True if rotor has stable BEMF feedback
 bool motorHasLock();
+bool motorFaultActive();
+bool motorDriverI2cPresent();
+// Command readiness, not just chip presence: false when the speed-command transport is disabled.
+bool motorDriverReady();
+bool motorClearFault();
+String motorMcfParamsJson();
 
-// Attach/detach zero-cross interrupts manually (rare)
-void motorAttachBemf(bool on);
+void motorDumpPins();
 
-/* ---------------------------------------------------------------
-   Debug / diagnostics
-   --------------------------------------------------------------- */
-
-enum MotorLogFormat : uint8_t { MLOG_HUMAN = 0, MLOG_CSV = 1 };
-
-void motorEnableDebug(bool on);
-void motorLogConfigure(bool enable,
-                       uint16_t period_ms = 200,
-                       MotorLogFormat fmt = MLOG_HUMAN,
-                       uint8_t level      = 2);
-
-void motorDebugService();     // call from main loop
-void motorLogOnce();          // single snapshot
-void motorDumpPins();         // print instantaneous pin states
-void motorForceStep(uint8_t step, uint8_t mag, uint16_t ms);
-
-/* ---------------------------------------------------------------
-   Compatibility
-   --------------------------------------------------------------- */
 inline void restartMotor() { startMotor(); }
 
-/* drive enable/disable used by higher-level PAP logic */
 inline void motorSetDriveEnabled(bool on) {
   if (on) startMotor();
   else    stopMotor();
 }
-
-/* trap keepalive is now a no-op (commutation fully task-based) */
-inline void motorTrapKeepalive(uint16_t, uint8_t) {}
 
 #endif  // MOTOR_H

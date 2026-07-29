@@ -1,169 +1,155 @@
-# Ozealis – The $75 Experimental CPAP Simulator
+# Ozealis
 
-> ⚠️ **NOT A MEDICAL DEVICE.** Experimental use only.  
-> **→ See full legal disclaimer below.**
+Ozealis is an open-source, experimental airflow simulation platform inspired by the spirit of projects like OpenAPS: community knowledge, repairability, and access where commercial systems are unavailable or unaffordable.
 
----
+It is not a medical device. It is not approved by any regulator. It makes no claims about diagnosis, treatment, cure, prevention, safety, reliability, or fitness for use. The repository is provided as-is, with no warranties.
 
-WARNING: This project is in pre-prototype / design phase. Nothing is tested yet.
-However, you’re welcome to follow, watch, or help out. Contributions and issues are welcome!
+Read [SAFETY.md](SAFETY.md) before building, flashing, testing, or modifying anything.
+Report security-sensitive issues through [SECURITY.md](SECURITY.md).
+Use [docs/release-checklist.md](docs/release-checklist.md) before tagging any release.
 
----
+## Project status
 
-## 💡 What Is Ozealis?
+Pre-prototype. Hardware, firmware, enclosure, and mobile control surfaces are under active development and require independent validation.
 
-Ozealis is a fully open-source, modular platform for exploring low-cost, user-driven air-pressure systems. It was created by necessity — for those of us who can’t afford to wait for diagnosis, approval, or overpriced medical devices.
+## Mission and design posture
 
-This project is not a product, nor a substitute for professional care. It is a tool for personal experimentation, educational insight, and collaborative innovation.
+Ozealis is built for concrete open-source pressure and airflow research that is transparent, reproducible, and accessible worldwide, especially where access to conventional equipment, trained support, replacement parts, or funding may be limited. The project should prefer inspectable hardware, commodity components, reproducible calibration steps, offline-friendly documentation, and logs that let builders understand what happened instead of guessing.
 
-Because sleep should be safe, and safety should be accessible.
+That mission does not change the public boundary. Ozealis is not approved equipment, not a replacement for regulated devices where they are available, and not a shortcut around professional review, local law, or independent validation. The engineering posture is to make every subsystem more measurable, conservative, repairable, and failure-aware while keeping claims honest.
 
----
+## Repository layout
 
-## 🔧 Features
+| Path | Purpose |
+| --- | --- |
+| `firmware/Rev 2/ozealis/` | ESP32 firmware for sensors, motor control, BLE telemetry, logs, settings, faults, and OTA hooks. |
+| `hardware/Rev 1/` | PCB project, BoM, interactive BoM, and printable mechanical parts. |
+| `mobile/` | React Native companion app for BLE control, telemetry, settings, logs, faults, and OTA commands. |
+| `docs/ble-protocol.md` | BLE service and characteristic contract used by firmware and the mobile app. |
+| `docs/mobile-app.md` | Mobile app setup and current limitations. |
+| `docs/motor-calibration.md` | Experimental bench motor/blower calibration notes. |
+| `docs/rev3-motor-driver.md` | MCF8316D Rev 3 motor-driver architecture notes. |
+| `docs/mcf8316d-bringup.md` | Bench bring-up checklist for the MCF8316D driver path. |
+| `docs/mcf8316d-commissioning.md` | MCF8316D parameter readback/write-gating contract. |
+| `docs/mcf8316d-register-manifest.json` | Machine-readable MCF8316D commissioning manifest. |
+| `docs/mobile-audit.md` | Current mobile dependency audit review and release handling notes. |
+| `docs/release-checklist.md` | Required checks before tagging a source release. |
+| `pictures/` | Project images and build references. |
 
-- ✅ PTC fuse protection on all power paths
-- ✅ Reverse polarity protection via MOSFET (no diode drop)
-- ✅ Optional power outage alarm via buzzer and capacitor-based UPS
-- ✅ DC5525 input (11V–30V) — compatible with laptop bricks & power stations
-- ✅ Differential pressure sensing via physical baffle (not RPM guesswork)
-- ✅ Pre/Post humidity & temperature sensing
-- ✅ Modular accessory port (USB-A + I²C) for:
-  - Heated hose module  
-  - Humidifier module  
-- ✅ App-controlled via Bluetooth
-- ✅ Compatible with $6 standard CPAP hoses
-- ✅ No proprietary parts, no DRM
-- ✅ Fully 3D-printable enclosure with FDM-optimized geometry
+## Current capabilities
 
----
+- ESP32 firmware with pressure sensing, guarded motor-driver abstraction, fault capture, BLE telemetry, settings persistence, logs, and OTA command plumbing.
+- Bluetooth companion app with scan/connect, live telemetry, settings read/write, log/fault export, and OTA command entry.
+- Open hardware files, BoM, and 3D-printable enclosure parts.
+- Explicit safety and contribution boundaries for open-source collaboration.
 
-## 📷 Photos & Demos
+## What this project is not
 
-Coming soon. This section will include:
+- Not a CPAP, BiPAP, ASV, ventilator, or other approved medical device.
+- Not a substitute for professional care.
+- Not validated for human use.
+- Not guaranteed to be safe, accurate, hygienic, durable, quiet, or reliable.
+- Not provided with warranty, support obligations, or liability acceptance.
 
-- High-resolution photos  
-- Assembly walk-throughs  
-- App UI screenshots  
-- Demo video showing pressure response & noise levels  
+## Mobile app
 
----
+The mobile app is in `mobile/`. For a browser layout preview without BLE hardware:
 
-## 📦 Getting Started
+Use Node.js `22.x` for mobile commands; the mobile package declares this engine and CI runs the same major version.
 
-### 🛠️ Build It Yourself
+```bash
+cd mobile
+npm ci --ignore-scripts
+npm run check:expo
+npm run typecheck
+npm run test:web-export
+npm run web
+```
 
-**Documentation coming soon.** For now, refer to:
+There is no `npm run build` script. `npm run test:web-export` is a bundler smoke for browser preview only. Native BLE control requires an Expo development build because `react-native-ble-plx` does not run as a full BLE client in Expo Go or the browser.
 
-- `hardware/` – Schematics, PCB layout, and BoM  
-- `firmware/` – ESP32 firmware and config  
-- `case/` – STL and STEP files for enclosure (PC + TPU)
+Create and install the native development client with `npm run android:dev-build`, or with `npm run ios:dev-build` from macOS for iOS. After that client is installed, `npm run android` / `npm run ios` starts Metro and launches the existing development build.
 
-Assembly requires:
+See [docs/mobile-app.md](docs/mobile-app.md).
 
-- Basic soldering skills  
-- A 3D printer with 0.4–0.6 mm nozzle  
+## Local verification
 
----
+Install Python 3.12 and the pinned PlatformIO Core `6.1.19` firmware tooling into a repository-local virtual environment. With `uv`, the same commands work on Linux, macOS, and Windows:
 
-## 📱 App & Data Logging
+```bash
+uv python install 3.12
+uv venv --python 3.12 .venv
+uv pip install --python .venv --requirement requirements-ci.txt
+```
 
-- Connect via WiFi to view real-time pressure graphs  
-- Export logs in JSON or CSV  
-- Tune pressure ramp profiles & buzzer thresholds  
-- OTA firmware updates planned  
+The local source-release gate prefers `.venv/bin/python3.12` on POSIX systems or `.venv\Scripts\python.exe` on Windows, then falls back to an active `python3.12`, `python3`, `python`, or Windows `py -3.12` launcher. Every accepted interpreter must report Python `3.12` and PlatformIO Core `6.1.19`. The gate also requires Node.js `22.x` and includes a clean `npm ci --ignore-scripts` install for the dependency-backed mobile checks:
 
----
+```bash
+node scripts/verify-local.mjs
+```
 
-## 🛡️ Safety Systems
+This runs the BLE protocol contract, release text guard, documentation link check, mobile Simple-mode copy check, clean mobile lockfile install, Expo dependency compatibility check, mobile production audit baseline check, mobile validation tests, mobile typecheck, mobile web export smoke, firmware builds, firmware flash-budget check, and repository hygiene check.
 
-Ozealis includes multiple built-in protections:
+## BLE protocol
 
-- 🧯 Overcurrent protection on all input/output rails  
-- 🔔 Power-loss alarm wakes user with buzzer  
-- 🌡️ Thermal cutoff disables output at unsafe temps  
-- 💨 Airflow anomaly detection via differential pressure monitoring  
+The firmware currently exposes a BLE service with telemetry, settings, logs, fault CSV, and OTA command/status characteristics. The app consumes that protocol directly.
 
-> This level of visibility is **absent in many commercial machines**.
+See [docs/ble-protocol.md](docs/ble-protocol.md).
 
----
+Important release-hardening note: sensitive BLE characteristics request encrypted, bonded access, but the current hardware pairing model is still OS "Just Works" and is not an app-layer authorization boundary.
 
-## 📄 License
+## Firmware
 
-This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**.
+Firmware entry point:
 
-Commercial use (manufacturing, distribution, resale) requires a separate license.  
-**Contact:** `team@ozealis.org`
+```text
+firmware/Rev 2/ozealis/ozealis.ino
+```
 
-See `LICENSE.md` for full terms.
+The firmware currently includes:
 
----
+- Sensor setup and pressure conversion helpers.
+- System state and fault handling.
+- AutoPAP-style experimental pressure target logic.
+- Classical therapy-mode identifiers in firmware/app settings: CPAP, AutoPAP, BiPAP S, BiPAP ST, BiPAP T, ASV, AutoASV, Auto BiPAP, BiPAP PC, and VAPS. BiPAP S currently maps to an experimental bilevel target family. BiPAP ST, BiPAP T, and BiPAP PC add an experimental backup-rate timing overlay that raises the pressure target to IPAP for the configured inspiratory-time window when the backup interval expires; this is not a validated ventilation algorithm. Trigger/cycle controls, servo-adaptation, auto-bilevel adaptation, and volume-assured pressure-support behavior are not implemented or validated yet.
+- MCF8316D-style sensorless FOC driver readiness and fault handling.
+- BLE telemetry, settings, log, fault, and OTA characteristics.
+- Diagnostic and data logging helpers.
 
-## 🚫 Not a Medical Device
+Build metadata for PlatformIO is included in `firmware/Rev 2/platformio.ini`. It pins the `espressif32` platform, the ESP32 Arduino framework/toolchain/upload packages used by the build, and the complete current direct/transitive firmware-library set. `requirements-ci.txt` separately pins the reviewed Python dependency closure for PlatformIO Core.
 
-Ozealis is **not approved** by Health Canada, the FDA, or any regulatory agency.  
-It is an airflow simulation platform intended for **research and experimental purposes only**.
+Current motor-driver boundary:
 
-> No claims are made regarding the treatment, cure, or prevention of sleep apnea or any other condition.
+- Default firmware probes the MCF8316D I2C target, uses the Rev 3 D-variant I2C speed-command register with readback verification, and blocks start/calibration unless the command path, I2C target, and fault state are all verified ready.
+- MCF8316D FG tach is routed to ESP32 GPIO33 and exported as `motor_fg_hz` / `motorFgHz` in live, retained-session, and fault evidence.
+- PWM speed command exists only in the explicit `esp32dev_bench_pwm` PlatformIO environment with `OZEALIS_BENCH_PWM_SPEED_FALLBACK=1` for instrumented bench bring-up.
+- Start and calibration are blocked in the mobile app and firmware when the driver is missing, faulted, or the command transport is disabled.
 
----
+Motor-driver firmware wiring and bench validation are documented in `firmware/Rev 2/README.md`, [docs/rev3-motor-driver.md](docs/rev3-motor-driver.md), and [docs/mcf8316d-bringup.md](docs/mcf8316d-bringup.md).
 
-## 🤝 Contribute
+## Hardware and enclosure
 
-Pull requests welcome! Areas to contribute:
+Hardware assets are in `hardware/Rev 1/`:
 
-- App UI & UX polish  
-- Log export improvements  
-- Pressure tuning curves  
-- Testing with accessories (heated hoses, passive humidifiers)  
+- PCB project files.
+- BoM spreadsheet and interactive BoM.
+- Printable `.3mf` enclosure and airflow parts.
+- Additional parts notes.
 
-Fork → improve → PR 💜
+Any build should be instrumented and validated independently before any practical experiment.
 
----
+## Contributing
 
-## 🗺️ Roadmap
+Contributions are welcome when they improve reproducibility, safety boundaries, firmware robustness, test coverage, mobile usability, hardware documentation, localization, or accessibility.
 
-- ✅ Full BoM and build guide  
-- ✅ App-based tuning UI  
-- ✅ Web configurator for real-time control  
-- 🎥 YouTube demo + sound comparison  
-- 🌍 Translations (FR, EN, ES)
+Please read [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
+## License
 
-**CRITICAL DISCLAIMER — READ BEFORE BUILDING OR USING OZEALIS**  
->   
-> 1. **No Medical Device.** Ozealis has **NOT** been reviewed or approved by any
->    regulatory body (FDA, Health Canada, EU MDR, etc.). It is an
->    **experimental air-pressure simulator** provided solely for research,
->    educational and personal *non-commercial* use.  
-> 2. **No Professional Advice.** All documentation is for informational
->    purposes only and does **not** constitute medical, engineering, or legal
->    advice. Consult qualified professionals before any practical use.  
-> 3. **AS-IS, NO WARRANTIES.** The files, firmware and hardware designs are
->    provided **“AS IS,” WITH ALL FAULTS, WITHOUT WARRANTIES** of any kind,
->    express or implied, including but not limited to merchantability,
->    fitness for a particular purpose and non-infringement.  
-> 4. **Assumption of Risk.** You assume **all risks** arising from loading,
->    building, testing or using Ozealis. You are responsible for validating
->    safety, performance and regulatory compliance of any assembly.  
-> 5. **Indemnity.** To the maximum extent permitted by law, you **agree to
->    indemnify and hold harmless** Shopiro Ltd. and contributors from any
->    claim, liability or expense (including legal fees) arising from your
->    use, reproduction, or distribution of these materials.  
-> 6. **Limitation of Liability.** In no event shall Shopiro Ltd. or
->    contributors be liable for **any indirect, special, incidental or
->    consequential damages** (including personal injury or death) or for an
->    amount exceeding **USD 10**, even if advised of the possibility.  
-> 7. **Governing Law & Venue.** These terms are governed by the laws of
->    Québec, Canada, and you consent to exclusive jurisdiction of its courts.  
->
-> **By cloning, downloading, or using any part of this repository you
-> acknowledge that you have read, understand, and agree to ALL of the above.**
+This project is licensed under Creative Commons Attribution-NonCommercial 4.0 International unless otherwise stated in a specific file.
 
----
+See [LICENSE.md](LICENSE.md).
 
-Made with urgency, necessity, and care in Canada 🇨🇦  
-Because breathing shouldn't require a credit check.
+## Trademark
 
-**Ozealis™ is a trademark of Shopiro Ltd.**
+Ozealis is a trademark of Shopiro Ltd.

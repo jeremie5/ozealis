@@ -1,0 +1,124 @@
+{
+  "driver": "MCF8316D",
+  "preferredPartNumber": "MCF8316DVRGFR",
+  "assemblyPart": {
+    "vendor": "JLCPCB",
+    "partNumber": "C47122159"
+  },
+  "status": "contract_only",
+  "bleSnapshot": {
+    "shortUuid": "0032",
+    "uuid": "7f2d0032-0f4d-4a1f-9f84-0c2a6b3d0000",
+    "encrypted": true,
+    "readOnlyUntilRegisterLayer": true,
+    "currentState": "readback_valid_when_i2c_speed_verified",
+    "pendingState": "register_layer_pending",
+    "includesI2cPresence": true,
+    "includesI2cAddress": true,
+    "includesFaultState": true,
+    "includesFgHz": true,
+    "includesCommandReadback": true,
+    "includesPinMap": true,
+    "includesCommandReady": true,
+    "writesAllowed": false
+  },
+  "i2c": {
+    "defaultTargetAddress": "0x01",
+    "transactionReference": "TI SLLA662"
+  },
+  "eepromReadback": {
+    "devCtrlRegister": "0x0000EA",
+    "loadShadowCommand": "0x40000000",
+    "minimumWaitMs": 100,
+    "shadowStart": "0x000080",
+    "shadowEnd": "0x0000AE",
+    "addressStepFor32BitRead": 2
+  },
+  "requiredParameters": [
+    {
+      "name": "MOTOR_RES",
+      "category": "motor",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": true
+    },
+    {
+      "name": "MOTOR_IND",
+      "category": "motor",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": true
+    },
+    {
+      "name": "MOTOR_BEMF_CONST",
+      "category": "motor",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": true
+    },
+    {
+      "name": "SPD_LOOP_KP",
+      "category": "control_loop",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": true
+    },
+    {
+      "name": "SPD_LOOP_KI",
+      "category": "control_loop",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": true
+    },
+    {
+      "name": "MAX_SPEED",
+      "category": "speed",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "zeroMeansCommissioningRequired": false
+    },
+    {
+      "name": "SPEED_MODE",
+      "category": "speed",
+      "address": null,
+      "addressSource": "datasheet_or_ti_gui_export_required",
+      "expectedRev3Value": "i2c_speed_command"
+    }
+  ],
+  "eepromSecurityStates": [
+    "eeprom_access_unknown",
+    "eeprom_read_allowed",
+    "eeprom_key_required",
+    "eeprom_write_locked",
+    "eeprom_locked_permanent"
+  ],
+  "writeGate": {
+    "systemMode": "idle",
+    "calibrationActive": false,
+    "motorCommand": 0,
+    "drvOffAsserted": true,
+    "i2cPresent": true,
+    "nFaultAsserted": false,
+    "requiresExplicitCommissioningAction": true,
+    "requiresPostWriteReadbackMatch": true,
+    "blocksStartAndCalibrationUntilVerified": true,
+    "forbiddenFromNormalSettingsWrites": true
+  },
+  "mpet": {
+    "benchOnly": true,
+    "requiresExplicitCommissioningMode": true,
+    "requiresAbortFromBleStop": true,
+    "requiresAbortFromPhysicalButton": true,
+    "requiresPostRunReadbackExport": true
+  },
+  "export": {
+    "format": "json",
+    "includeFirmwareBuild": true,
+    "includeBoardRevision": true,
+    "includeDriverPart": true,
+    "includeRegisterSource": true,
+    "includeFaultStatus": true,
+    "includeCalibrationProfileReference": true,
+    "neverIncludeEepromPasscode": true
+  }
+}

@@ -1,783 +1,445 @@
-// motor.cpp  DRV8313 EN(PWM) + IN(direction) on ESP32
+// motor.cpp  MCF8316D speed-command wrapper
 #include "motor.h"
-#include <math.h>
-#include <pgmspace.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <driver/gpio.h>
 #include <driver/ledc.h>
-
-/* 8-bit sine LUT 0..255 */
-static const uint8_t sineLUT[256] PROGMEM = {
-  128,131,134,137,140,143,146,149,152,155,158,162,165,167,170,173,
-  176,179,182,185,188,190,193,196,198,201,203,206,208,211,213,215,
-  218,220,222,224,226,228,230,232,234,235,237,238,240,241,243,244,
-  245,246,248,249,250,250,251,252,253,253,254,254,254,255,255,255,
-  255,255,255,255,254,254,254,253,253,252,251,250,250,249,248,246,
-  245,244,243,241,240,238,237,235,234,232,230,228,226,224,222,220,
-  218,215,213,211,208,206,203,201,198,196,193,190,188,185,182,179,
-  176,173,170,167,165,162,158,155,152,149,146,143,140,137,134,131,
-  128,124,121,118,115,112,109,106,103,100,97,93,90,88,85,82,
-  79,76,73,70,67,65,62,59,57,54,52,49,47,44,42,40,
-  37,35,33,31,29,27,25,23,21,20,18,17,15,14,12,11,
-  10,9,7,6,5,5,4,3,2,2,1,1,1,0,0,0,
-  0,0,0,0,1,1,1,2,2,3,4,5,5,6,7,9,
-  10,11,12,14,15,17,18,20,21,23,25,27,29,31,33,35,
-  37,40,42,44,47,49,52,54,57,59,62,65,67,70,73,76,
-  79,82,85,88,90,93,97,100,103,106,109,112,115,118,121,124
-};
-
-/* ===== state machine ===== */
-enum MotorState : uint8_t {
-  MSTATE_IDLE = 0,
-  MSTATE_PREKICK,
-  MSTATE_ALIGN,
-  MSTATE_RAMP,
-  MSTATE_BEMF_WAIT,
-  MSTATE_RESCUE,
-  MSTATE_RUN
-};
-
-static volatile MotorState g_state = MSTATE_IDLE;
-static bool    g_state_init       = false;
-
-// align state
-static uint8_t  g_align_try   = 0;
-static uint8_t  g_align_step  = 0;
-
-// ramp state
-static uint16_t g_ramp_i      = 0;
-static uint8_t  g_ramp_step   = 0;
-static uint32_t g_ramp_next_us = 0;
-
-// BEMF handoff
-static uint32_t g_handoff_start_ms = 0;
-static uint32_t g_bemf_e0          = 0;
-
-// rescue
-static uint32_t g_rescue_start_ms = 0;
-static uint8_t  g_rescue_step     = 0;
-
-// control task handle
-static TaskHandle_t g_ctrlTask = nullptr;
-
-/* public state */
-volatile uint16_t elecAngle = 0;
-volatile uint32_t bemfEdges = 0;
-
-/* private state */
-static uint8_t amplitude = 0;  // 0..255 magnitude
-
-static uint32_t g_trap_assist_until = 0;
-
-/* LEDC channel and pin maps: 0=U,1=V,2=W */
-static const ledc_channel_t CHMAP[3] = { EN_CH_U, EN_CH_V, EN_CH_W };
-static const int            ENPIN[3] = { EN_U_PIN, EN_V_PIN, EN_W_PIN };
-static const int            INPIN[3] = { IN_U_PIN, IN_V_PIN, IN_W_PIN };
-
-/* profile */
-static MotorProfile g_prof;
-
-/* ISR service / IRQ guards */
-static bool s_isr_service_installed = false;
-static bool s_irq_attached          = false;
-
-/* state flags */
-static volatile bool g_running   = false;   // driver awake + EN driving allowed
-static volatile bool g_bemfOn    = false;   // logical enable for BEMF ISR gating
-static volatile bool g_debug     = false;
-static volatile bool g_drvFault = false; /* DRV8313 fault (nFAULT) */
-
-/* commutation helpers */
-static TaskHandle_t  g_commTask  = nullptr;
-static volatile bool g_commPend  = false;
-
-/* which phase is floating during 6-step (0=U,1=V,2=W) */
-static volatile uint8_t g_floatPhase = 2;
-static volatile bool    g_trapMode   = false;   // true when using trapStep()
-
-/* BEMF edge debouncers and adaptive ZC */
-static volatile uint32_t lastUsU = 0, lastUsV = 0, lastUsW = 0;
-static volatile uint32_t lastPeriodUs = 0;      // rough recent ZC period
-
-/* logging config */
-static uint16_t      g_log_ms = 200;
-static MotorLogFormat g_log_fmt = MLOG_HUMAN;
-static uint8_t       g_log_level = 2;
-static bool          g_log_enable = false;
-static uint32_t      g_log_last = 0;
-static uint32_t      g_edges_last = 0;
-static uint32_t      g_hold_until = 0;
-
-// ---------------------------------------------------------------
-// Forward declarations for internal helpers (static functions)
-// ---------------------------------------------------------------
-
-// low-level PWM helpers
-static void enWrite(uint8_t ph, uint8_t duty);
-static uint32_t enRead(uint8_t ph);
-
-// commutation primitives
-static void trapStep(uint8_t step, uint8_t mag);
-static void refreshSineVector();
-
-// misc helpers
-static void setPwmFreq(uint32_t hz);
-static bool in_hold_window();
-static int16_t lutSigned(uint8_t idx);
-static void drivePolarity(uint8_t ph, bool high_side);
-
-// internal stop
-static void motorStopInternal();
-
-/* -------- helpers -------- */
-void IRAM_ATTR drvFaultISR() {
-  g_drvFault = true;      // set flag, handled next control-task cycle
-}
-
-static void motorStopInternal() {
-  motorAttachBemf(false);
-  g_running = false;
-  amplitude = 0;
-  enWrite(0,0); enWrite(1,0); enWrite(2,0);
-  digitalWrite(IN_U_PIN, LOW);
-  digitalWrite(IN_V_PIN, LOW);
-  digitalWrite(IN_W_PIN, LOW);
-  digitalWrite(NSLEEP_PIN, LOW);
-}
-
-static inline void allEN0() {
-  enWrite(0,0); enWrite(1,0); enWrite(2,0);
-}
-
-static inline uint8_t trapStepToAngle(uint8_t step) {
-  // center of each 60° electrical sector (256-angle space)
-  static const uint8_t lut[6] = {
-    21,   // 30°
-    64,   // 90°
-    107,  // 150°
-    149,  // 210°
-    192,  // 270°
-    235   // 330°
-  };
-  return lut[step % 6];
-}
-
-static void motorControlTask(void *arg){
-  (void)arg;
-  Serial.println("Motor: Control alive");
-  for(;;){
-    MotorState s = g_state;
-
-    // global fault check (latched)
-    if (g_drvFault) {
-      g_drvFault = false;
-
-      // confirm it's actually low for ~1ms
-      bool stableLow = true;
-      for (int i=0; i<20; i++){
-        if (digitalRead(DRV_FAULT_PIN) != LOW) { stableLow = false; break; }
-        delayMicroseconds(50);
-      }
-      if (!stableLow) {
-        // ignore glitch
-        continue;
-      }
-
-      Serial.println("DRV FAULT detected! Forcing motor stop.");
-      motorStopInternal();
-      g_state = MSTATE_IDLE;
-      g_state_init = false;
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-    switch (s) {
-      case MSTATE_IDLE:
-        // Nothing to do; sleep a bit
-        vTaskDelay(pdMS_TO_TICKS(10));
-        break;
-
-      case MSTATE_PREKICK:
-        if (!g_state_init) {
-          g_state_init = true;
-          trapStep(0, g_prof.align_mag);   // use the low align magnitude
-          g_rescue_start_ms = millis();   // reuse as pre-kick timer
-        }
-        if (millis() - g_rescue_start_ms >= g_prof.start_kick_ms) {
-          trapStep(0, g_prof.align_mag);
-          vTaskDelay(pdMS_TO_TICKS(10));  // small settle
-          g_state      = (g_prof.multi_align_tries ? MSTATE_ALIGN : MSTATE_RAMP);
-          g_state_init = false;
-        } else {
-          vTaskDelay(pdMS_TO_TICKS(1));
-        }
-        break;
-
-      case MSTATE_ALIGN:
-        if (!g_state_init) {
-          g_state_init  = true;
-          g_align_try   = 0;
-          g_align_step  = 0;
-          g_rescue_start_ms = millis(); // reused per-try timing
-        }
-
-        if (g_align_try >= max<uint8_t>(1, g_prof.multi_align_tries)) {
-          // done with align attempts → go ramp
-          g_state      = MSTATE_RAMP;
-          g_state_init = false;
-          break;
-        }
-
-        // per-try timing
-        if (millis() - g_rescue_start_ms >= (uint32_t)g_prof.align_ms + 15) {
-          uint8_t step = g_align_try % 6;
-          trapStep(step, g_prof.align_mag);
-          g_align_try++;
-          g_rescue_start_ms = millis();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1));
-        break;
-
-      case MSTATE_RAMP:
-        if (!g_state_init) {
-          g_state_init   = true;
-          g_ramp_i       = 0;
-          g_ramp_step    = 0;
-          g_ramp_next_us = micros();
-        }
-
-        if (g_ramp_i >= g_prof.ramp_steps) {
-          // end of ramp → BEMF handoff
-          g_state      = MSTATE_BEMF_WAIT;
-          g_state_init = false;
-          break;
-        }
-
-        {
-          uint32_t now_us = micros();
-          if ((int32_t)(now_us - g_ramp_next_us) >= 0) {
-            // compute dwell & mag for this step
-            const int32_t dwell_span = (int32_t)g_prof.ramp_dwell_us0 - (int32_t)g_prof.ramp_dwell_us1;
-            const int32_t mag_span   = (int32_t)g_prof.ramp_mag1      - (int32_t)g_prof.ramp_mag0;
-
-            uint32_t dwell = g_prof.ramp_dwell_us0 -
-                             (uint32_t)((dwell_span * (int32_t)g_ramp_i) / (int32_t)g_prof.ramp_steps);
-            uint8_t  mag   = g_prof.ramp_mag0 +
-                             (int32_t)((mag_span   * (int32_t)g_ramp_i) / (int32_t)g_prof.ramp_steps);
-
-            trapStep(g_ramp_step, mag);
-            g_ramp_step = (g_ramp_step + 1) % 6;
-            g_ramp_i++;
-
-            g_ramp_next_us = now_us + dwell;
-          }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1)); // yield to keep WDT happy
-        break;
-
-        case MSTATE_BEMF_WAIT:
-          if (!g_state_init) {
-            g_state_init = true;
-
-            // stop trap torque fully before handoff
-            allEN0();
-
-            // seed electrical angle from last ramp step
-            elecAngle = trapStepToAngle(g_ramp_step);
-
-            // do NOT slam full amplitude here
-            amplitude = g_prof.ramp_mag1;
-
-            g_trap_assist_until = millis() + 120;   // 120 ms of trap assist
-
-            // allow currents to settle before enabling BEMF
-            motorAttachBemf(false);
-            vTaskDelay(pdMS_TO_TICKS(20));
-            motorAttachBemf(true);
-
-            refreshSineVector();
-
-            g_hold_until       = millis() + g_prof.hold_ms;
-            setPwmFreq(g_prof.run_pwm_hz);
-
-            g_handoff_start_ms = millis();
-            g_bemf_e0          = bemfEdges;
-          }
-
-          if ((bemfEdges - g_bemf_e0) > 20 &&
-              millis() - g_handoff_start_ms > 100) {
-            g_state      = MSTATE_RUN;
-            g_state_init = false;
-            break;
-          }
-
-          if (millis() - g_handoff_start_ms > g_prof.handoff_ms) {
-            g_state      = MSTATE_RESCUE;
-            g_state_init = false;
-            break;
-          }
-
-          vTaskDelay(pdMS_TO_TICKS(5));
-          break;
-
-      case MSTATE_RESCUE:
-        if (!g_state_init) {
-          g_state_init        = true;
-          g_rescue_start_ms   = millis();
-          g_rescue_step       = 0;
-        }
-
-        if (millis() - g_rescue_start_ms > g_prof.rescue_ms) {
-          // give up, stop the motor
-          motorStopInternal();
-          g_state      = MSTATE_IDLE;
-          g_state_init = false;
-          break;
-        }
-
-        // simple spinning rescue
-        trapStep(g_rescue_step, g_prof.rescue_mag);
-        g_rescue_step = (g_rescue_step + 1) % 6;
-
-        // check for lock using your existing heuristic
-        if (motorHasLock()) {
-            refreshSineVector();
-            g_state = MSTATE_RUN;
-            g_state_init = false;
-            break;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1));
-        break;
-
-      case MSTATE_RUN:
-        // motor is fully started; nothing to do here
-        vTaskDelay(pdMS_TO_TICKS(10));
-        break;
-    }
-  }
-}
-
-static inline void setPwmFreq(uint32_t hz){
-  // one LEDC timer feeds all three channels
-  ledc_set_freq(PWM_MODE, PWM_TIMER, hz);
-}
-
-static inline bool in_hold_window(){
-  return millis() < g_hold_until;
-}
-
-static inline int16_t lutSigned(uint8_t idx){
-  return (int16_t)pgm_read_byte(&sineLUT[idx]) - 128;
-}
-
-static inline void drivePolarity(uint8_t ph, bool high_side){
-#if DRV8313_IN_HIGH_SELECTS_HIGHSIDE
-  digitalWrite(INPIN[ph], high_side ? HIGH : LOW);
+#include <Wire.h>
+
+#ifndef OZEALIS_MOTOR_SERIAL_LOG
+#define OZEALIS_MOTOR_SERIAL_LOG 0
+#endif
+
+#if OZEALIS_MOTOR_SERIAL_LOG
+#define MOTOR_LOG_PRINTLN(message) Serial.println(message)
+#define MOTOR_LOG_PRINTF(...) Serial.printf(__VA_ARGS__)
 #else
-  digitalWrite(INPIN[ph], high_side ? LOW : HIGH);
+#define MOTOR_LOG_PRINTLN(message) do { } while (0)
+#define MOTOR_LOG_PRINTF(...) do { } while (0)
+#endif
+
+static MotorProfile g_prof;
+static volatile bool g_running = false;
+static volatile bool g_faultLatched = false;
+static volatile uint32_t g_fgPulses = 0;
+static uint8_t g_amplitude = 0;
+static uint16_t g_commandProxy = 0;
+static bool g_i2cPresent = false;
+static bool g_i2cSpeedReadbackValid = false;
+static float g_fgHz = 0.0f;
+static uint32_t g_fgLastSampleMs = 0;
+static uint32_t g_fgLastPulses = 0;
+
+static bool commandTransportReady();
+static bool probeDriverI2c();
+static bool writeCommand(uint8_t amp);
+static bool verifyI2cSpeedReadyIfIdle();
+static void writeDrvOff(bool disabled);
+static void sampleFg();
+
+static constexpr uint16_t MCF_REG_ALGO_DEBUG1 = 0x00EC;
+static constexpr uint16_t MCF_REG_ALGO_CTRL1 = 0x00EA;
+static constexpr uint32_t MCF_ALGO_DEBUG1_OVERRIDE = 0x80000000UL;
+static constexpr uint32_t MCF_ALGO_CTRL1_CLR_FLT = 0x20000000UL;
+
+void IRAM_ATTR mcfFaultISR() {
+  g_faultLatched = true;
+}
+
+void IRAM_ATTR mcfFgISR() {
+  ++g_fgPulses;
+}
+
+static void writeDrvOff(bool disabled) {
+#if MCF_DRVOFF_PIN >= 0
+  digitalWrite(MCF_DRVOFF_PIN, disabled ? HIGH : LOW);
+#else
+  (void)disabled;
 #endif
 }
 
-static inline void enWrite(uint8_t ph, uint8_t duty){
-  ledc_set_duty(PWM_MODE, CHMAP[ph], duty);
-  ledc_update_duty(PWM_MODE, CHMAP[ph]);
-}
-static inline uint32_t enRead(uint8_t ph){
-  return ledc_get_duty(PWM_MODE, CHMAP[ph]);
-}
-
-/* phase driver: select polarity on INx, magnitude on ENx; mag 0 -> float */
-static inline void setPhaseSigned(uint8_t ph, int16_t sVal){
-  uint8_t mag = (uint8_t)min<int16_t>(abs(sVal), 255);
-
-  // extra torque only during trap assist window
-  if (millis() < g_trap_assist_until) {
-    if (mag < 80) mag = 80;
-  }
-
-  if (!g_running || mag == 0) { enWrite(ph, 0); return; }
-
-  // Apply minimums so real current actually flows
-  if (g_trapMode) {
-    if (mag < g_prof.trap_floor) mag = g_prof.trap_floor;
-  } else if (in_hold_window()) {
-    if (mag < g_prof.sine_floor) mag = g_prof.sine_floor;
-  }
-
-  drivePolarity(ph, sVal >= 0);
-  enWrite(ph, mag);
+static bool commandTransportReady() {
+#if OZEALIS_MCF8316D_I2C_SPEED
+  return g_i2cSpeedReadbackValid;
+#else
+  return OZEALIS_BENCH_PWM_SPEED_FALLBACK != 0;
+#endif
 }
 
-/* write the current sine vector to all phases (task context) */
-static void refreshSineVector(){
-  g_trapMode = false;
-  const int16_t u = (int16_t)((lutSigned((uint8_t)elecAngle)       * amplitude) >> 7);
-  const int16_t v = (int16_t)((lutSigned((uint8_t)(elecAngle+85))  * amplitude) >> 7);
-  const int16_t w = (int16_t)((lutSigned((uint8_t)(elecAngle+171)) * amplitude) >> 7);
-  setPhaseSigned(0, u);
-  setPhaseSigned(1, v);
-  setPhaseSigned(2, w);
+static void writeMotorCommandProxy(uint8_t amp) {
+  g_amplitude = amp;
+  g_commandProxy = map(amp, 0, 255, 0, (1 << MOTOR_PWM_BITS) - 1);
 }
 
-/* 6-step trapezoid (two phases driven, one floating)
-   DRV8313 sign-magnitude safe version */
-static void trapStep(uint8_t step, uint8_t mag) {
- if (!g_running || mag == 0) return;
-
-  g_trapMode = true;
-
-  uint8_t hi=0, lo=1, fl=2;
-  switch (step % 6) {
-    case 0: hi=0; lo=1; fl=2; break; // U+ V-
-    case 1: hi=0; lo=2; fl=1; break; // U+ W-
-    case 2: hi=1; lo=2; fl=0; break; // V+ W-
-    case 3: hi=1; lo=0; fl=2; break; // V+ U-
-    case 4: hi=2; lo=0; fl=1; break; // W+ U-
-    case 5: hi=2; lo=1; fl=0; break; // W+ V-
-  }
-  g_floatPhase = fl;
-
-  // 1) Turn PWM off on all phases before changing polarity (prevents braking/shoot-through)
-  enWrite(0, 0); enWrite(1, 0); enWrite(2, 0);
-
-  // 2) Set directions while everything is off
-  drivePolarity(hi, true);    // source
-  drivePolarity(lo, false);   // sink
-  // floating phase ignored
-
-  delayMicroseconds(2);
-
-  // 3) Drive: PWM on hi, FULL ON on lo, float fl
-  enWrite(fl, 0);
-  uint8_t sink = mag;          // same as source
-  if (sink < 80) sink = 80;    // minimum conduction so there is a path
-  if (sink > 140) sink = 140;  // prevent current spikes
-  enWrite(lo, sink);
-  enWrite(hi, mag);
-
-  //Serial.printf("step=%u hi=%u lo=%u fl=%u duty(U,V,W)=(%lu,%lu,%lu)\n",
-  //step%6, hi, lo, fl,
-  //(unsigned long)enRead(0),
-  //(unsigned long)enRead(1),
-  //(unsigned long)enRead(2));
+static void restoreWireClock() {
+  Wire.setClock(OZEALIS_WIRE_DEFAULT_HZ);
 }
 
-/* LEDC setup */
-static void setupLEDC(){
-  ledc_timer_config_t tcfg = {};
-  tcfg.speed_mode      = PWM_MODE;
-  tcfg.timer_num       = PWM_TIMER;
-  tcfg.duty_resolution = LEDC_TIMER_8_BIT;
-  tcfg.freq_hz         = g_prof.run_pwm_hz; // default; we may switch at start
-  tcfg.clk_cfg         = LEDC_AUTO_CLK;
-  ledc_timer_config(&tcfg);
-
-  ledc_channel_config_t c = {};
-  c.speed_mode = PWM_MODE;
-  c.intr_type  = LEDC_INTR_DISABLE;
-  c.timer_sel  = PWM_TIMER;
-  c.hpoint     = 0;
-
-  for (int i = 0; i < 3; ++i){
-    c.channel  = CHMAP[i];
-    c.gpio_num = ENPIN[i];
-    c.duty     = 0;
-    ledc_channel_config(&c);
-  }
-
-  Serial.printf("Motor: LEDC init: %lu Hz, 8-bit on EN pins (%d,%d,%d)\n",
-                (unsigned long)ledc_get_freq(PWM_MODE, PWM_TIMER),
-                ENPIN[0], ENPIN[1], ENPIN[2]);
-}
-
-/* commutation task: apply PWM in task context to keep ISR lean */
-static void motorCommTask(void*){
-  Serial.println("Motor: Comm alive");
-  for(;;){
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    if (g_commPend){
-      g_commPend = false;
-      refreshSineVector();
+static bool mcfWrite32(uint16_t reg, uint32_t value) {
+  Wire.setClock(MCF_I2C_TRANSACTION_HZ);
+  const uint8_t control0 = 0x10;  // write, CRC disabled, 32-bit data length
+  const uint8_t control1 = (uint8_t)((reg >> 8) & 0x0f);
+  const uint8_t control2 = (uint8_t)(reg & 0xff);
+  for (uint8_t attempt = 0; attempt < 5; ++attempt) {
+    Wire.beginTransmission(MCF_I2C_ADDR);
+    Wire.write(control0);
+    delayMicroseconds(100);
+    Wire.write(control1);
+    delayMicroseconds(100);
+    Wire.write(control2);
+    delayMicroseconds(100);
+    Wire.write((uint8_t)(value & 0xff));
+    delayMicroseconds(100);
+    Wire.write((uint8_t)((value >> 8) & 0xff));
+    delayMicroseconds(100);
+    Wire.write((uint8_t)((value >> 16) & 0xff));
+    delayMicroseconds(100);
+    Wire.write((uint8_t)((value >> 24) & 0xff));
+    const uint8_t result = Wire.endTransmission();
+    delayMicroseconds(100);
+    if (result == 0) {
+      restoreWireClock();
+      return true;
     }
   }
-}
-
-/* adaptive ZC debounce */
-static inline bool zc_ok(uint32_t now, volatile uint32_t& lastUs) {
-  uint32_t dt  = now - lastUs;
-  uint32_t dyn = lastPeriodUs ? (lastPeriodUs / 8) : 120;   // ~12.5% of recent period
-  uint32_t minZC = dyn;
-  if (minZC < g_prof.min_zc_us_floor) minZC = g_prof.min_zc_us_floor;
-  if (minZC > g_prof.min_zc_us_ceil)  minZC = g_prof.min_zc_us_ceil;
-  if (dt < minZC) return false;
-  lastPeriodUs = dt;
-  lastUs = now;
-  return true;
-}
-
-/* ===== public API ===== */
-void setupMotor(const MotorProfile& prof){
-  g_prof = prof;
-
-  if (!s_isr_service_installed) {
-    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
-      s_isr_service_installed = true;
-    } else {
-      Serial.printf("Motor: gpio_install_isr_service err=0x%x\n", (unsigned)err);
-    }
-  }
-
-  // hold driver asleep so pins can settle
-  pinMode(NSLEEP_PIN, OUTPUT);
-  digitalWrite(NSLEEP_PIN, LOW);
-
-  // direction pins safe
-  pinMode(IN_U_PIN, OUTPUT); digitalWrite(IN_U_PIN, LOW);
-  pinMode(IN_V_PIN, OUTPUT); digitalWrite(IN_V_PIN, LOW);
-  pinMode(IN_W_PIN, OUTPUT); digitalWrite(IN_W_PIN, LOW);
-
-  #if BEMF_INTERNAL_PULLUP
-    pinMode(BEMF_U_IN, INPUT_PULLUP);
-    pinMode(BEMF_V_IN, INPUT_PULLUP);
-    pinMode(BEMF_W_IN, INPUT_PULLUP);
-  #else
-    pinMode(BEMF_U_IN, INPUT);       // externals provide the pull-up
-    pinMode(BEMF_V_IN, INPUT);
-    pinMode(BEMF_W_IN, INPUT);
-  #endif
-
-  Serial.printf("Motor: BEMF pull-ups: %s\n",
-                BEMF_INTERNAL_PULLUP ? "internal" : "external");
-
-  // EN pins low before LEDC
-  pinMode(EN_U_PIN, OUTPUT); digitalWrite(EN_U_PIN, LOW);
-  pinMode(EN_V_PIN, OUTPUT); digitalWrite(EN_V_PIN, LOW);
-  pinMode(EN_W_PIN, OUTPUT); digitalWrite(EN_W_PIN, LOW);
-
-  setupLEDC();
-
-  // DRV8313 nFAULT input
-  pinMode(26, INPUT);                 // already has external 10k pull-up
-  attachInterrupt(digitalPinToInterrupt(26),
-                  drvFaultISR, FALLING);
-  Serial.println("Motor: DRV fault IRQ attached");
-
-  // Wake driver
-  delay(2);
-  Serial.printf("Motor: NSLEEP before=%d\n", digitalRead(NSLEEP_PIN));
-
-  digitalWrite(NSLEEP_PIN, HIGH);
-  delayMicroseconds(50);
-
-  int ns = digitalRead(NSLEEP_PIN);
-  if (ns == LOW) {
-    Serial.println("Motor: NSLEEP toggle failed");
-    return;
-  }
-
-  Serial.printf("Motor: NSLEEP after=%d\n", ns);
-  delay(2);
-
-  amplitude = 0;
-  g_running = false;
-  enWrite(0,0); enWrite(1,0); enWrite(2,0);
-
-  // commutation task on core 0
-  if (!g_commTask) {
-    xTaskCreatePinnedToCore(motorCommTask, "motor_comm", 4096, nullptr, 3, &g_commTask, 0);
-    Serial.println("Motor: Pinned commutation to core 0");
-  }
-
-  // control state machine task on core 0
-  if (!g_ctrlTask) {
-    xTaskCreatePinnedToCore(motorControlTask, "motor_ctrl", 4096, nullptr, 4, &g_ctrlTask, 0);
-    Serial.println("Motor: Pinned control to core 0");
-  }
-  Serial.println("Motor: Setup completed");
-}
-
-uint8_t motorGetAmplitude(){ return amplitude; }
-
-void setMotorAmplitude(uint8_t amp){
-  uint8_t req = amp;
-  if (g_running && in_hold_window()) {
-    amp = (req < g_prof.hold_amp) ? g_prof.hold_amp : req;
-  }
-  amplitude = amp;
-  if (!g_running) return;
-  refreshSineVector();
-}
-
-bool motorIsStarting(){
-  return (g_state != MSTATE_IDLE && g_state != MSTATE_RUN);
-}
-
-/* BEMF advance: +60 electrical deg per edge, ISR very lean */
-void IRAM_ATTR advanceElectricalAngle(){
-  elecAngle += 32;                 // 256 * 60/360
-  g_commPend = true;
-  if (g_commTask){
-    BaseType_t hpw = pdFALSE;
-    vTaskNotifyGiveFromISR(g_commTask, &hpw);
-    if (hpw) portYIELD_FROM_ISR();
-  }
-}
-
-/* ISR wrappers with float-phase gating and debounce */
-void IRAM_ATTR bemfISR_U(){
-  if (!g_bemfOn || !g_running || g_floatPhase != 0) return;
-  uint32_t now = micros();
-  if (zc_ok(now, lastUsU)) { bemfEdges++; advanceElectricalAngle(); }
-}
-void IRAM_ATTR bemfISR_V(){
-  if (!g_bemfOn || !g_running || g_floatPhase != 1) return;
-  uint32_t now = micros();
-  if (zc_ok(now, lastUsV)) { bemfEdges++; advanceElectricalAngle(); }
-}
-void IRAM_ATTR bemfISR_W(){
-  if (!g_bemfOn || !g_running || g_floatPhase != 2) return;
-  uint32_t now = micros();
-  if (zc_ok(now, lastUsW)) { bemfEdges++; advanceElectricalAngle(); }
-}
-
-static void attachBEMFInterruptsOnce() {
-  if (s_irq_attached) return;
-  attachInterrupt(digitalPinToInterrupt(BEMF_U_IN), bemfISR_U, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(BEMF_V_IN), bemfISR_V, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(BEMF_W_IN), bemfISR_W, CHANGE);
-  s_irq_attached = true;
-  Serial.println("BEMF IRQs attached");
-}
-static void detachBEMFInterrupts() {
-  if (!s_irq_attached) return;
-  detachInterrupt(digitalPinToInterrupt(BEMF_U_IN));
-  detachInterrupt(digitalPinToInterrupt(BEMF_V_IN));
-  detachInterrupt(digitalPinToInterrupt(BEMF_W_IN));
-  s_irq_attached = false;
-}
-
-void motorAttachBemf(bool on) {
-  if (on) {
-    if (!g_running) return;
-    if (digitalRead(NSLEEP_PIN) == LOW) return;
-    lastUsU = lastUsV = lastUsW = micros();   // reset debounce
-    g_bemfOn = true;
-    attachBEMFInterruptsOnce();
-  } else {
-    g_bemfOn = false;
-    detachBEMFInterrupts();
-  }
-}
-
-void startMotor() {
-  Serial.println("Motor: Starting");
-  if (digitalRead(DRV_FAULT_PIN) == LOW) {
-    Serial.println("Motor: DRV faulted, refusing to start");
-    return;
-  }
-  // wake driver
-  digitalWrite(NSLEEP_PIN, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(10));   // give it time (bootstrap etc.)
-  // make sure outputs start disabled
-  enWrite(0,0); enWrite(1,0); enWrite(2,0);
-  g_running = true;
-  g_state = (g_prof.start_kick_ms ? MSTATE_PREKICK : MSTATE_ALIGN);
-  g_state_init = false;
-}
-
-void stopMotor(){
-  g_state      = MSTATE_IDLE;
-  g_state_init = false;
-  motorStopInternal();
-}
-
-/* soft lock detector based on edge rate */
-bool motorHasLock() {
-  static uint32_t last_edges = 0, last_ms = 0;
-  uint32_t now = millis();
-  if (now - last_ms >= 200) {
-    uint32_t de = bemfEdges - last_edges;
-    last_edges = bemfEdges;
-    last_ms = now;
-    return de > 50;
-  }
+  restoreWireClock();
   return false;
 }
 
-/* ===== logging and debug ===== */
-void motorLogConfigure(bool enable, uint16_t period_ms, MotorLogFormat fmt, uint8_t level){
-  g_log_enable = enable;
-  g_log_ms     = period_ms;
-  g_log_fmt    = fmt;
-  g_log_level  = level;
-  g_log_last   = 0;
-  g_edges_last = bemfEdges;
-}
-void motorEnableDebug(bool on){
-  motorLogConfigure(on, 200, MLOG_HUMAN, 2);
-}
-
-void motorLogOnce(){
-  uint32_t du = enRead(0), dv = enRead(1), dw = enRead(2);
-  uint8_t  iu = digitalRead(IN_U_PIN), iv = digitalRead(IN_V_PIN), iw = digitalRead(IN_W_PIN);
-  uint32_t edges = bemfEdges;
-  uint32_t dE = edges >= g_edges_last ? (edges - g_edges_last) : 0;
-  g_edges_last = edges;
-  int bu = digitalRead(BEMF_U_IN), bv = digitalRead(BEMF_V_IN), bw = digitalRead(BEMF_W_IN);
-
-  if (g_log_fmt == MLOG_CSV) {
-    // time,amp,angle,ENu,ENv,ENw,INu,INv,INw,edges,dE,bemfU,bemfV,bemfW
-    Serial.printf("%lu,%u,%u,%lu,%lu,%lu,%u,%u,%u,%lu,%lu,%d,%d,%d\n",
-      (unsigned long)millis(), amplitude, (unsigned)(elecAngle & 0xFF),
-      (unsigned long)du, (unsigned long)dv, (unsigned long)dw,
-      iu, iv, iw, (unsigned long)edges, (unsigned long)dE, bu, bv, bw);
-  } else {
-    if (g_log_level >= 2) {
-      Serial.printf("MDBG amp=%u angle=%u EN(U,V,W)=(%lu,%lu,%lu) IN(U,V,W)=(%u,%u,%u) edges=%lu dE=%lu bemf(U,V,W)=(%d,%d,%d)\n",
-        amplitude, (unsigned)(elecAngle & 0xFF),
-        (unsigned long)du, (unsigned long)dv, (unsigned long)dw,
-        iu, iv, iw,
-        (unsigned long)edges, (unsigned long)dE,
-        bu, bv, bw);
-    } else {
-      Serial.printf("MDBG amp=%u angle=%u EN=(%lu,%lu,%lu) edges=%lu dE=%lu\n",
-        amplitude, (unsigned)(elecAngle & 0xFF),
-        (unsigned long)du, (unsigned long)dv, (unsigned long)dw,
-        (unsigned long)edges, (unsigned long)dE);
+static bool mcfRead32(uint16_t reg, uint32_t& value) {
+  Wire.setClock(MCF_I2C_TRANSACTION_HZ);
+  const uint8_t control0 = 0x90;  // read, CRC disabled, 32-bit data length
+  const uint8_t control1 = (uint8_t)((reg >> 8) & 0x0f);
+  const uint8_t control2 = (uint8_t)(reg & 0xff);
+  for (uint8_t attempt = 0; attempt < 5; ++attempt) {
+    Wire.beginTransmission(MCF_I2C_ADDR);
+    Wire.write(control0);
+    delayMicroseconds(100);
+    Wire.write(control1);
+    delayMicroseconds(100);
+    Wire.write(control2);
+    uint8_t result = Wire.endTransmission(false);
+    delayMicroseconds(100);
+    if (result != 0) continue;
+    const uint8_t got = Wire.requestFrom((uint8_t)MCF_I2C_ADDR, (uint8_t)4, (uint8_t)true);
+    if (got == 4) {
+      const uint32_t b0 = Wire.read();
+      const uint32_t b1 = Wire.read();
+      const uint32_t b2 = Wire.read();
+      const uint32_t b3 = Wire.read();
+      value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+      restoreWireClock();
+      return true;
     }
   }
+  restoreWireClock();
+  return false;
 }
 
-void motorDebugService(){
-  if (!g_log_enable) return;
-  uint32_t now = millis();
-  if (now - g_log_last >= g_log_ms) {
-    g_log_last = now;
-    motorLogOnce();
+static uint32_t i2cSpeedWord(uint8_t amp) {
+  const uint32_t speed = map(amp, 0, 255, 0, 32767);
+  return MCF_ALGO_DEBUG1_OVERRIDE | ((speed & 0x7fffUL) << 16);
+}
+
+static bool writeI2cSpeedCommand(uint8_t amp) {
+  const uint32_t command = i2cSpeedWord(amp);
+  if (!mcfWrite32(MCF_REG_ALGO_DEBUG1, command)) return false;
+  uint32_t readback = 0;
+  if (!mcfRead32(MCF_REG_ALGO_DEBUG1, readback)) return false;
+  return (readback & 0xffff0000UL) == command;
+}
+
+static bool clearMcfLatchedFaults() {
+  if (!probeDriverI2c()) return false;
+  if (!mcfWrite32(MCF_REG_ALGO_CTRL1, MCF_ALGO_CTRL1_CLR_FLT)) return false;
+  delay(10);
+  return probeDriverI2c();
+}
+
+static bool verifyI2cSpeedReadyIfIdle() {
+#if OZEALIS_MCF8316D_I2C_SPEED
+  if (g_running || g_amplitude != 0 || g_faultLatched) return g_i2cSpeedReadbackValid;
+  if (!probeDriverI2c()) {
+    g_i2cSpeedReadbackValid = false;
+    return false;
+  }
+  g_i2cSpeedReadbackValid = writeI2cSpeedCommand(0);
+  writeMotorCommandProxy(0);
+  return g_i2cSpeedReadbackValid;
+#else
+  return commandTransportReady();
+#endif
+}
+
+static bool writeCommand(uint8_t amp) {
+#if OZEALIS_MCF8316D_I2C_SPEED
+  if (!probeDriverI2c()) {
+    g_i2cSpeedReadbackValid = false;
+    amp = 0;
+  }
+  const bool ok = writeI2cSpeedCommand(amp);
+  g_i2cSpeedReadbackValid = ok;
+  if (!ok) amp = 0;
+  writeMotorCommandProxy(amp);
+  return ok;
+#else
+  if (!commandTransportReady()) amp = 0;
+  writeMotorCommandProxy(amp);
+  ledc_set_duty(MOTOR_PWM_MODE, MOTOR_SPEED_CH, g_commandProxy);
+  ledc_update_duty(MOTOR_PWM_MODE, MOTOR_SPEED_CH);
+  return commandTransportReady();
+#endif
+}
+
+static void configurePwm(uint32_t hz) {
+  ledc_timer_config_t timer = {};
+  timer.speed_mode = MOTOR_PWM_MODE;
+  timer.timer_num = MOTOR_PWM_TIMER;
+  timer.duty_resolution = (ledc_timer_bit_t)MOTOR_PWM_BITS;
+  timer.freq_hz = hz;
+  timer.clk_cfg = LEDC_AUTO_CLK;
+  ledc_timer_config(&timer);
+
+  ledc_channel_config_t channel = {};
+  channel.gpio_num = MOTOR_SPEED_PWM_PIN;
+  channel.speed_mode = MOTOR_PWM_MODE;
+  channel.channel = MOTOR_SPEED_CH;
+  channel.intr_type = LEDC_INTR_DISABLE;
+  channel.timer_sel = MOTOR_PWM_TIMER;
+  channel.duty = 0;
+  channel.hpoint = 0;
+  ledc_channel_config(&channel);
+}
+
+static bool probeDriverI2c() {
+  Wire.beginTransmission(MCF_I2C_ADDR);
+  g_i2cPresent = (Wire.endTransmission() == 0);
+  return g_i2cPresent;
+}
+
+static void sampleFg() {
+#if MCF_FG_PIN >= 0
+  const uint32_t now = millis();
+  if (g_fgLastSampleMs == 0) {
+    g_fgLastSampleMs = now;
+    g_fgLastPulses = g_fgPulses;
+    g_fgHz = 0.0f;
+    return;
+  }
+  const uint32_t elapsed = now - g_fgLastSampleMs;
+  if (elapsed < 250) return;
+  const uint32_t pulses = g_fgPulses;
+  const uint32_t delta = pulses - g_fgLastPulses;
+  g_fgHz = (delta * 1000.0f) / (float)elapsed;
+  g_fgLastPulses = pulses;
+  g_fgLastSampleMs = now;
+#else
+  g_fgHz = 0.0f;
+#endif
+}
+
+void setupMotor(const MotorProfile& prof) {
+  g_prof = prof;
+  configurePwm(g_prof.command_pwm_hz);
+
+#if MCF_DRVOFF_PIN >= 0
+  pinMode(MCF_DRVOFF_PIN, OUTPUT);
+  writeDrvOff(true);
+#endif
+
+#if MCF_NFAULT_PIN >= 0
+  pinMode(MCF_NFAULT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(MCF_NFAULT_PIN), mcfFaultISR, FALLING);
+#endif
+
+#if MCF_FG_PIN >= 0
+  pinMode(MCF_FG_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(MCF_FG_PIN), mcfFgISR, FALLING);
+#endif
+
+  writeCommand(0);
+  probeDriverI2c();
+  sampleFg();
+#if OZEALIS_MCF8316D_I2C_SPEED
+  verifyI2cSpeedReadyIfIdle();
+  if (g_i2cSpeedReadbackValid) {
+    MOTOR_LOG_PRINTLN("Motor: MCF8316D I2C speed command readback verified");
+  } else {
+    MOTOR_LOG_PRINTLN("Motor: MCF8316D I2C speed command readback not verified");
+  }
+#else
+  if (commandTransportReady()) {
+    MOTOR_LOG_PRINTF("Motor: BENCH PWM fallback on GPIO %d at %lu Hz\n",
+                     MOTOR_SPEED_PWM_PIN,
+                     (unsigned long)g_prof.command_pwm_hz);
+  } else {
+    MOTOR_LOG_PRINTLN("Motor: speed command disabled until MCF8316D I2C speed writes are implemented");
+  }
+#endif
+  MOTOR_LOG_PRINTF("Motor: MCF8316D I2C addr=0x%02x present=%u\n",
+                   MCF_I2C_ADDR,
+                   (unsigned)g_i2cPresent);
+}
+
+void startMotor() {
+  if (!verifyI2cSpeedReadyIfIdle()) {
+    MOTOR_LOG_PRINTLN("Motor: I2C speed command readback not verified, start ignored");
+    stopMotor();
+    return;
+  }
+  if (!motorDriverReady()) {
+    MOTOR_LOG_PRINTLN("Motor: MCF not ready, start ignored");
+    return;
+  }
+  writeDrvOff(false);
+  g_running = true;
+}
+
+void motorEmergencyDisable() {
+  writeDrvOff(true);
+  g_running = false;
+}
+
+void stopMotor() {
+  motorEmergencyDisable();
+  writeCommand(0);
+}
+
+void setMotorAmplitude(uint8_t amp) {
+  if (!g_running && amp > 0) startMotor();
+  if (amp > 0 && !motorDriverReady()) {
+    stopMotor();
+    return;
+  }
+  if (g_faultLatched) {
+    stopMotor();
+    return;
+  }
+  if (!writeCommand(g_running ? amp : 0)) {
+    g_faultLatched = true;
+    stopMotor();
   }
 }
 
-/* Pin dump */
-void motorDumpPins(){
-  int ns = digitalRead(NSLEEP_PIN);
-  int iu = digitalRead(IN_U_PIN), iv = digitalRead(IN_V_PIN), iw = digitalRead(IN_W_PIN);
-  uint32_t du = ledc_get_duty(PWM_MODE, EN_CH_U);
-  uint32_t dv = ledc_get_duty(PWM_MODE, EN_CH_V);
-  uint32_t dw = ledc_get_duty(PWM_MODE, EN_CH_W);
-  Serial.printf("PINS nSLEEP=%d IN(U,V,W)=(%d,%d,%d) EN(U,V,W)=(%lu,%lu,%lu)\n",
-                ns, iu, iv, iw, (unsigned long)du, (unsigned long)dv, (unsigned long)dw);
+uint8_t motorGetAmplitude() {
+  return g_amplitude;
 }
 
-/* Force one trapezoid step strongly */
-void motorForceStep(uint8_t step, uint8_t mag, uint16_t ms){
-  setPhaseSigned(0,0); setPhaseSigned(1,0); setPhaseSigned(2,0);
-  delay(2);
-  trapStep(step, mag);
-  Serial.printf("FORCE step=%u mag=%u\n", step%6, mag);
-  delay(ms);
-  setPhaseSigned(0,0); setPhaseSigned(1,0); setPhaseSigned(2,0);
+uint16_t motorGetCommand() {
+  return g_commandProxy;
+}
+
+float motorGetFgHz() {
+  sampleFg();
+  return g_fgHz;
+}
+
+bool motorIsRunning() {
+  return g_running;
+}
+
+bool motorIsStarting() {
+  return false;
+}
+
+bool motorHasLock() {
+  return g_running && !g_faultLatched;
+}
+
+bool motorFaultActive() {
+#if MCF_NFAULT_PIN >= 0
+  if (digitalRead(MCF_NFAULT_PIN) == LOW) {
+    g_faultLatched = true;
+  }
+#endif
+  return g_faultLatched;
+}
+
+bool motorDriverI2cPresent() {
+  return probeDriverI2c();
+}
+
+bool motorDriverReady() {
+  if (!verifyI2cSpeedReadyIfIdle()) return false;
+  if (!probeDriverI2c()) {
+    g_faultLatched = true;
+    return false;
+  }
+  return !motorFaultActive();
+}
+
+bool motorClearFault() {
+  if (!probeDriverI2c()) return false;
+  if (!clearMcfLatchedFaults()) return false;
+#if MCF_NFAULT_PIN >= 0
+  if (digitalRead(MCF_NFAULT_PIN) == LOW) return false;
+#endif
+#if OZEALIS_MCF8316D_I2C_SPEED
+  g_i2cSpeedReadbackValid = writeI2cSpeedCommand(0);
+  writeMotorCommandProxy(0);
+  if (!g_i2cSpeedReadbackValid) return false;
+#else
+  if (!commandTransportReady()) return false;
+#endif
+#if MCF_NFAULT_PIN >= 0
+  if (digitalRead(MCF_NFAULT_PIN) == LOW) return false;
+#endif
+  g_faultLatched = false;
+  return true;
+}
+
+static float finiteMcfSnapshotNumber(float value, float fallback, float minValue, float maxValue) {
+  if (!isfinite(value)) return fallback;
+  if (value < minValue) return fallback;
+  if (value > maxValue) return fallback;
+  return value;
+}
+
+String motorMcfParamsJson() {
+  const bool i2cPresent = motorDriverI2cPresent();
+  const bool faultActive = motorFaultActive();
+  if (i2cPresent && !faultActive) verifyI2cSpeedReadyIfIdle();
+  const bool i2cSpeed = OZEALIS_MCF8316D_I2C_SPEED != 0 && g_i2cSpeedReadbackValid;
+  const bool benchFallback = OZEALIS_MCF8316D_I2C_SPEED == 0 && commandTransportReady();
+  const bool ready = commandTransportReady() && i2cPresent && !faultActive;
+  const float statusFgHz = finiteMcfSnapshotNumber(motorGetFgHz(), 0.0f, 0.0f, 100000.0f);
+  char out[448];
+  snprintf(out, sizeof(out),
+           "{\"driver\":\"MCF8316D\",\"state\":\"%s\","
+           "\"i2c\":%s,\"fault\":%s,\"i2cAddr\":\"0x%02x\",\"fgHz\":%.2f,"
+           "\"commandAmp\":%u,\"commandPwm\":%u,"
+           "\"runtimeSpeed\":\"%s\",\"targetSpeed\":\"i2c\","
+           "\"commandReady\":%s,\"writesAllowed\":false,\"benchOnly\":%s,"
+           "\"pins\":{\"speedPwm\":%d,\"drvOff\":%d,\"nFault\":%d,\"fg\":%d}}",
+           i2cSpeed ? "readback_valid" : "register_layer_pending",
+           i2cPresent ? "true" : "false",
+           faultActive ? "true" : "false",
+           MCF_I2C_ADDR,
+           statusFgHz,
+           (unsigned)motorGetAmplitude(),
+           (unsigned)motorGetCommand(),
+           i2cSpeed ? "i2c" : (benchFallback ? "bench_pwm_fallback" : "disabled_until_i2c_speed"),
+           ready ? "true" : "false",
+           benchFallback ? "true" : "false",
+           MOTOR_SPEED_PWM_PIN,
+           MCF_DRVOFF_PIN,
+           MCF_NFAULT_PIN,
+           MCF_FG_PIN);
+  return String(out);
+}
+
+void motorDumpPins() {
+#if MCF_NFAULT_PIN >= 0
+  int faultLevel = digitalRead(MCF_NFAULT_PIN);
+#else
+  int faultLevel = -1;
+#endif
+  MOTOR_LOG_PRINTF("Motor pins: speed_gpio=%d drvOff_gpio=%d nFault_gpio=%d fg_gpio=%d nFault=%d amp=%u cmd=%u fg_hz=%.2f i2c=%u\n",
+                   MOTOR_SPEED_PWM_PIN,
+                   MCF_DRVOFF_PIN,
+                   MCF_NFAULT_PIN,
+                   MCF_FG_PIN,
+                   faultLevel,
+                   (unsigned)g_amplitude,
+                   (unsigned)g_commandProxy,
+                   motorGetFgHz(),
+                   (unsigned)g_i2cPresent);
 }

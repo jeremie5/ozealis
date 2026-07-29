@@ -30,12 +30,19 @@ float vinFiltered();   // low pass filtered VIN
 // Pressure IO
 bool  readPressures(float &pMask_hPa, float &pBlower_hPa);  // per call read
 bool  sensorsOK();                                         // debounced health
-float getPressureDiff();                                   // blower − mask hPa
+float getPressureDiff();                                   // blower - mask hPa
 float getPressureDiffCached();                             // cached diff hPa
 
 // Ambient estimate and gauge helpers
 float sensorAmbient_hPa();                                 // current ambient estimate
 void  sensorUpdateAmbientEstimate(float pMask_hPa, float diff_hPa); // call each loop
+void  sensorDifferentialTrimResetSamples();
+bool  sensorDifferentialTrimCaptureSample();               // capture no-flow blower-mask offset
+bool  sensorDifferentialTrimCommit();                      // persist averaged captured offset
+const char* sensorDifferentialTrimStatus();
+bool  sensorDifferentialTrimValid();
+float sensorDifferentialTrim_hPa();
+uint16_t sensorDifferentialTrimSamples();
 
 // Unit conversion helpers
 float cmH2O_to_hPa(float cm);

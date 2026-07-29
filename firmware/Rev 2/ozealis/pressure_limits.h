@@ -1,0 +1,8 @@
+#ifndef PRESSURE_LIMITS_H
+#define PRESSURE_LIMITS_H
+
+constexpr float MIN_THERAPY_PRESSURE_CM = 4.0f;
+constexpr float MAX_MASK_PRESSURE_CM = 25.0f;
+constexpr float MAX_THERAPY_PRESSURE_CM = MAX_MASK_PRESSURE_CM;
+
+#endif  // PRESSURE_LIMITS_H

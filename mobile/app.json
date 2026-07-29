@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Ozealis Control",
+    "slug": "ozealis-control",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "neverForLocation": true,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Allow Ozealis Control to connect to nearby Ozealis experimental airflow devices."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.ozealis.control",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Ozealis Control uses Bluetooth to connect to an Ozealis experimental airflow device.",
+        "NSBluetoothPeripheralUsageDescription": "Ozealis Control uses Bluetooth to connect to an Ozealis experimental airflow device."
+      }
+    },
+    "android": {
+      "package": "org.ozealis.control",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
