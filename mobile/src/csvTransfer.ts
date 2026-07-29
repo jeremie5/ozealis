@@ -28,6 +28,8 @@ export type CsvTransferTransport = {
   readResponse: () => Promise<string>;
 };
 
+export type CsvTransferCurrentCheck = () => boolean;
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -108,11 +110,23 @@ export function csvTransferMtuCanCarryMaxResponse(mtu: number): boolean {
     mtu - CSV_TRANSFER_ATT_OVERHEAD_BYTES >= CSV_TRANSFER_MAX_RESPONSE_CHARS;
 }
 
-export async function readCsvTransferWithTransport(transport: CsvTransferTransport): Promise<CsvTransferSnapshot> {
+function assertTransferCurrent(isCurrent: CsvTransferCurrentCheck): void {
+  if (!isCurrent()) {
+    throw new Error("CSV transfer session is no longer current.");
+  }
+}
+
+export async function readCsvTransferWithTransport(
+  transport: CsvTransferTransport,
+  isCurrent: CsvTransferCurrentCheck = () => true,
+): Promise<CsvTransferSnapshot> {
   const transfer = new CsvTransferAssembler();
   for (let page = 0; page < CSV_TRANSFER_MAX_PAGES; page += 1) {
+    assertTransferCurrent(isCurrent);
     await transport.writeRequest(transfer.requestJson());
+    assertTransferCurrent(isCurrent);
     const response = await transport.readResponse();
+    assertTransferCurrent(isCurrent);
     if (transfer.accept(response)) return transfer.finishSnapshot();
   }
   throw new Error("CSV transfer exceeded the page limit.");

@@ -104,6 +104,37 @@ try {
     assert.equal(request, `{"offset":${(index + 1) * CSV_TRANSFER_RAW_PAGE_BYTES},"generation":${transportGeneration}}`);
   });
 
+  let transferCurrent = true;
+  let invalidatedPageWrites = 0;
+  let invalidatedPageReads = 0;
+  await assert.rejects(
+    readCsvTransferWithTransport(
+      {
+        async writeRequest(request) {
+          invalidatedPageWrites += 1;
+          assert.equal(request, "{\"offset\":0}");
+        },
+        async readResponse() {
+          invalidatedPageReads += 1;
+          const firstPage = transportBytes.subarray(0, CSV_TRANSFER_RAW_PAGE_BYTES);
+          transferCurrent = false;
+          return JSON.stringify({
+            ok: true,
+            generation: transportGeneration,
+            offset: 0,
+            total: transportBytes.length,
+            hash: transportHash,
+            data: firstPage.toString("base64"),
+          });
+        },
+      },
+      () => transferCurrent,
+    ),
+    /session is no longer current/,
+  );
+  assert.equal(invalidatedPageWrites, 1);
+  assert.equal(invalidatedPageReads, 1);
+
   const characteristicUuid = "7f2d0021-0f4d-4a1f-9f84-0c2a6b3d0000";
   const deviceRequests = [];
   let deviceResponse = "";
@@ -130,7 +161,7 @@ try {
       return { value: Buffer.from(deviceResponse, "utf8").toString("base64") };
     },
   };
-  const deviceSnapshot = await readCsvTransfer(mockDevice, characteristicUuid);
+  const deviceSnapshot = await readCsvTransfer(mockDevice, characteristicUuid, () => true);
   assert.deepEqual(deviceSnapshot, transportSnapshot);
   assert.ok(deviceRequests.length > 1);
   assert.equal(deviceRequests[0], "{\"offset\":0}");

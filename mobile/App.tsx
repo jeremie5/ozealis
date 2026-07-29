@@ -21,6 +21,8 @@ import {
 } from "react-native";
 import { BleManager, Device, State, Subscription } from "react-native-ble-plx";
 
+import { advanceSessionGeneration, OperationLeaseCoordinator } from "./src/operationLease";
+import type { OperationLeaseToken } from "./src/operationLease";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_PREWARM_SCHEDULE,
@@ -95,6 +97,31 @@ type WaterSetupKey = "tube" | "water" | "ruler" | "secure" | "bench";
 type ModeAwareMessage = string | { simple: string; advanced: string };
 type GraphScale = "all" | "10m" | "1m" | "30s";
 type ControlCommand = "start" | "stop" | "prewarmStart" | "prewarmStop";
+type CalibrationCommand = "start" | "waterStart" | "capture" | "abort";
+type ForegroundBleOperation =
+  | "connection:connect"
+  | "connection:disconnect"
+  | "settings:read"
+  | "settings:write"
+  | "logs:read:manual"
+  | "logs:read:auto"
+  | "logs:clear"
+  | "motor-fault:clear"
+  | "driver:read"
+  | "ota:write"
+  | `control:${ControlCommand}`
+  | `calibration:${CalibrationCommand}`;
+type ForegroundBleLease = {
+  device: Device;
+  sessionId: number;
+  operation: ForegroundBleOperation;
+  token: OperationLeaseToken<ForegroundBleOperation>;
+};
+type OtaCommandPayload = {
+  ssid: string;
+  password: string;
+  url: string;
+};
 type QueuedOximetryRelay = {
   sample: OximetrySample;
   oximeterDeviceId: string;
@@ -211,7 +238,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
           <View style={styles.errorPanel}>
             <Text style={styles.errorTitle}>App view stopped</Text>
             <Text style={styles.mutedText}>
-              No device command was sent. Return to the app view, then reconnect before changing airflow or setup.
+              A command already in flight may have reached the device. Return to the app view, then reconnect and verify device state before changing airflow or setup.
             </Text>
             <Pressable
               accessibilityRole="button"
@@ -243,6 +270,7 @@ function OzealisApp() {
   const oximeterSubscriptionsRef = useRef<Subscription[]>([]);
   const scanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const oximeterScanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scanAdmissionRef = useRef<{ kind: "ozealis" | "oximeter" } | null>(null);
   const autoImportRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousModeRef = useRef(EMPTY_TELEMETRY.mode);
   const previousAdvancedModeRef = useRef(false);
@@ -252,9 +280,16 @@ function OzealisApp() {
   const prewarmScheduleSkipKeyRef = useRef("");
   const connectedDeviceRef = useRef<Device | null>(null);
   const deviceSessionIdRef = useRef(0);
+  const foregroundBleCoordinatorRef = useRef<OperationLeaseCoordinator<ForegroundBleOperation> | null>(null);
+  const connectionTransitionTokenRef = useRef<OperationLeaseToken<ForegroundBleOperation> | null>(null);
   const protocolVersionRef = useRef("unknown");
   const oximeterDeviceRef = useRef<Device | null>(null);
   const oximeterSessionIdRef = useRef(0);
+  const oximeterTransitionRef = useRef<{
+    operation: "connect" | "disconnect";
+    deviceId: string;
+    sessionId: number;
+  } | null>(null);
   const oximetryRelayRef = useRef<LatestOnlyAsyncRelay<QueuedOximetryRelay> | null>(null);
   const liveSyncRowsRef = useRef<string[]>([]);
   const liveSyncPendingRowsRef = useRef<string[]>([]);
@@ -278,8 +313,10 @@ function OzealisApp() {
   const [bleState, setBleState] = useState<State>("Unknown" as State);
   const [devices, setDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
+  const [connectionTransitionBusy, setConnectionTransitionBusy] = useState(false);
   const [oximeterDevice, setOximeterDevice] = useState<Device | null>(null);
   const [oximeterScanning, setOximeterScanning] = useState(false);
+  const [oximeterTransitionBusy, setOximeterTransitionBusy] = useState(false);
   const [oximetrySample, setOximetrySample] = useState<OximetrySample | null>(null);
   const [oximetryNow, setOximetryNow] = useState(() => Date.now());
   const [telemetry, setTelemetry] = useState<OzealisTelemetry>(() => ({ ...EMPTY_TELEMETRY }));
@@ -309,6 +346,25 @@ function OzealisApp() {
   const faultCsv = retainedImport?.faultCsv || "";
   const retainedImportManifest = retainedImport?.manifest || null;
 
+  if (!foregroundBleCoordinatorRef.current) {
+    foregroundBleCoordinatorRef.current = new OperationLeaseCoordinator<ForegroundBleOperation>({
+      isSessionCurrent: (identity) => (
+        typeof identity.sessionId === "number"
+        && isSameDeviceSession(
+          connectedDeviceRef.current?.id,
+          deviceSessionIdRef.current,
+          identity.deviceId,
+          identity.sessionId,
+        )
+      ),
+      setBusy,
+      transportBarrier: {
+        clearPending: () => oximetryRelayRef.current?.clearPending(),
+        whenIdle: () => oximetryRelayRef.current?.whenIdle() ?? Promise.resolve(),
+      },
+    });
+  }
+
   if (!oximetryRelayRef.current) {
     oximetryRelayRef.current = new LatestOnlyAsyncRelay<QueuedOximetryRelay>(async (queued) => {
       if (
@@ -336,6 +392,7 @@ function OzealisApp() {
       ) {
         return;
       }
+      if (foregroundBleCoordinatorRef.current?.activeIdentity()) return;
       await writeUtf8(
         device,
         OZEALIS_CHARACTERISTICS.oximetryRelay,
@@ -550,6 +607,7 @@ function OzealisApp() {
       setBleState("Unsupported" as State);
       setMessage("Previewing the app layout.");
       return () => {
+        invalidateDeviceSessionLifecycle();
         cleanupSubscriptions();
         cleanupOximeterSubscriptions();
         clearAutoImportRetry();
@@ -570,11 +628,37 @@ function OzealisApp() {
         stopOximeterScan();
         setDevices([]);
         cleanupOximeterSubscriptions();
-        resetOximeterSessionState();
-        if (connectedDeviceRef.current) {
+        const oximeterTransition = oximeterTransitionRef.current;
+        const oximeterResetSessionId =
+          oximeterTransition?.sessionId
+          ?? (oximeterDeviceRef.current ? oximeterSessionIdRef.current : null);
+        if (oximeterResetSessionId !== null) {
+          resetOximeterSessionState(oximeterResetSessionId);
+        }
+        if (oximeterTransitionRef.current === oximeterTransition) {
+          oximeterTransitionRef.current = null;
+          setOximeterTransitionBusy(false);
+        }
+        const connectionTransition = connectionTransitionTokenRef.current;
+        const transitionSessionId = connectionTransition?.identity.sessionId;
+        const foregroundSessionId = foregroundBleCoordinatorRef.current?.activeIdentity()?.sessionId;
+        const resetSessionId =
+          typeof transitionSessionId === "number"
+            ? transitionSessionId
+            : typeof foregroundSessionId === "number"
+              ? foregroundSessionId
+              : connectedDeviceRef.current
+                ? deviceSessionIdRef.current
+                : null;
+        if (resetSessionId !== null) {
           cleanupSubscriptions();
-          resetDeviceSessionState();
-          flushLiveSyncCsv();
+          if (resetDeviceSessionState(resetSessionId)) flushLiveSyncCsv();
+        } else {
+          foregroundBleCoordinatorRef.current?.invalidateAll();
+        }
+        if (connectionTransitionTokenRef.current === connectionTransition) {
+          connectionTransitionTokenRef.current = null;
+          setConnectionTransitionBusy(false);
         }
         if (state !== "Unknown") setMessage(advancedModeRef.current ? `Bluetooth ${state}. Turn Bluetooth on before scanning.` : "Turn Bluetooth on to pair.");
       }
@@ -583,6 +667,7 @@ function OzealisApp() {
     return () => {
       const activeDevice = connectedDeviceRef.current;
       const activeOximeter = oximeterDeviceRef.current;
+      invalidateDeviceSessionLifecycle();
       stateSub.remove();
       cleanupSubscriptions();
       cleanupOximeterSubscriptions();
@@ -591,10 +676,10 @@ function OzealisApp() {
       oximetryRelayRef.current?.clearPending();
       stopScan();
       stopOximeterScan();
+      if (managerRef.current === manager) managerRef.current = null;
       flushLiveSyncCsv();
       const closeManager = () => {
         manager.destroy();
-        if (managerRef.current === manager) managerRef.current = null;
       };
       const closeTasks = [activeDevice, activeOximeter]
         .filter((device): device is Device => Boolean(device))
@@ -733,8 +818,9 @@ function OzealisApp() {
         return;
       }
       prewarmScheduleSkipKeyRef.current = "";
-      setPrewarmSchedule(markPrewarmScheduleRun(prewarmSchedule, now));
-      void sendControlCommand("prewarmStart");
+      void sendControlCommand("prewarmStart", () => {
+        setPrewarmSchedule((current) => markPrewarmScheduleRun(current, now));
+      });
     }, 15000);
     return () => clearInterval(timer);
   }, [prewarmSchedule, prewarmStartAllowed]);
@@ -755,81 +841,159 @@ function OzealisApp() {
   }
 
   async function startScan() {
+    if (connectionTransitionTokenRef.current || oximeterTransitionRef.current) return;
     const manager = managerRef.current;
     if (!manager || blePreviewMode) {
       setMessage(advancedMode ? "Bluetooth scanning is available only in the Android or iOS app." : "Pairing is available in the phone app.");
       return;
     }
-    const allowed = await requestBlePermissions();
-    if (!allowed) {
-      setMessage(advancedMode ? "Bluetooth permission is required to scan." : "Allow Bluetooth to pair.");
-      return;
-    }
-    if (bleState !== "PoweredOn") {
-      setMessage(advancedMode ? "Turn Bluetooth on before scanning." : "Turn Bluetooth on to pair.");
-      return;
-    }
-
-    setDevices([]);
+    if (scanAdmissionRef.current?.kind === "ozealis") return;
+    const previousScanStop =
+      scanAdmissionRef.current?.kind === "oximeter"
+        ? stopOximeterScan()
+        : Promise.resolve();
+    const admission = { kind: "ozealis" as const };
+    scanAdmissionRef.current = admission;
     setScanning(true);
-    stopScan(false);
-    stopOximeterScan();
-    manager.startDeviceScan([OZEALIS_SERVICE_UUID], { allowDuplicates: false }, (error, device) => {
-      if (error) {
-        setMessage(actionErrorMessage(error, "Could not scan. Try again.", "Scan failed."));
-        stopScan();
+    let scanStarted = false;
+    try {
+      await previousScanStop;
+      if (
+        scanAdmissionRef.current !== admission
+        || connectionTransitionTokenRef.current
+        || oximeterTransitionRef.current
+      ) return;
+      const allowed = await requestBlePermissions();
+      if (
+        scanAdmissionRef.current !== admission
+        || connectionTransitionTokenRef.current
+        || oximeterTransitionRef.current
+      ) return;
+      if (!allowed) {
+        setMessage(advancedMode ? "Bluetooth permission is required to scan." : "Allow Bluetooth to pair.");
         return;
       }
-      if (!device || !isOzealisDevice(device)) return;
-      setDevices((current) => {
-        if (current.some((item) => item.id === device.id)) return current;
-        return [...current, device];
-      });
-    });
+      const liveBleState = await manager.state();
+      if (
+        scanAdmissionRef.current !== admission
+        || connectionTransitionTokenRef.current
+        || oximeterTransitionRef.current
+      ) return;
+      if (liveBleState !== "PoweredOn") {
+        setMessage(advancedMode ? "Turn Bluetooth on before scanning." : "Turn Bluetooth on to pair.");
+        return;
+      }
+      if (
+        scanAdmissionRef.current !== admission
+        || connectionTransitionTokenRef.current
+        || oximeterTransitionRef.current
+      ) return;
 
-    scanTimeoutRef.current = setTimeout(() => stopScan(), 12000);
+      setDevices([]);
+      await manager.startDeviceScan([OZEALIS_SERVICE_UUID], { allowDuplicates: false }, (error, device) => {
+        if (scanAdmissionRef.current !== admission) return;
+        if (error) {
+          setMessage(actionErrorMessage(error, "Could not scan. Try again.", "Scan failed."));
+          stopScan();
+          return;
+        }
+        if (
+          !device
+          || !isOzealisDevice(device)
+          || !(device.serviceUUIDs || []).some((uuid) => uuid.toLowerCase() === OZEALIS_SERVICE_UUID)
+        ) return;
+        setDevices((current) => {
+          if (current.some((item) => item.id === device.id)) return current;
+          return [...current, device];
+        });
+      });
+      if (
+        scanAdmissionRef.current !== admission
+        || connectionTransitionTokenRef.current
+        || oximeterTransitionRef.current
+      ) {
+        if (scanAdmissionRef.current === admission) {
+          void manager.stopDeviceScan().catch(() => undefined);
+        }
+        return;
+      }
+      scanStarted = true;
+      scanTimeoutRef.current = setTimeout(() => {
+        if (scanAdmissionRef.current === admission) stopScan();
+      }, 12000);
+    } catch (error) {
+      if (scanAdmissionRef.current === admission) {
+        setMessage(actionErrorMessage(error, "Could not scan. Try again.", "Scan failed."));
+      }
+    } finally {
+      if (!scanStarted && scanAdmissionRef.current === admission) {
+        scanAdmissionRef.current = null;
+        setScanning(false);
+        void manager.stopDeviceScan().catch(() => undefined);
+      }
+    }
   }
 
   async function connect(device: Device) {
+    if (connectionTransitionTokenRef.current) return;
     const sessionId = deviceSessionIdRef.current + 1;
     deviceSessionIdRef.current = sessionId;
+    foregroundBleCoordinatorRef.current!.invalidateAll();
+    connectedDeviceRef.current = null;
+    const transition = reserveConnectionTransition("connection:connect", device, sessionId);
+    if (!transition) return;
     protocolVersionRef.current = "unknown";
     setSettingsReadbackValid(false);
     cleanupSubscriptions();
-    setBusy(true);
     setMessage("Connecting...");
     let discovered: Device | null = null;
     let connectedForCleanup: Device | null = null;
     try {
       stopScan();
+      stopOximeterScan();
       setDevices([]);
-      oximetryRelayRef.current?.clearPending();
       await oximetryRelayRef.current?.whenIdle();
-      if (deviceSessionIdRef.current !== sessionId) return;
+      if (!isConnectionTransitionCurrent(transition)) return;
       const connected = await device.connect({ timeout: 12000 });
       connectedForCleanup = connected;
+      if (!isConnectionTransitionCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(connected.id, sessionId);
+        return;
+      }
       let mtuReady = connected;
       if (Platform.OS === "android") {
         mtuReady = await connected.requestMTU(517).catch(() => connected);
         connectedForCleanup = mtuReady;
+        if (!isConnectionTransitionCurrent(transition)) {
+          await cancelConnectionCandidateUnlessReplaced(mtuReady.id, sessionId);
+          return;
+        }
       }
       discovered = await mtuReady.discoverAllServicesAndCharacteristics();
-      if (deviceSessionIdRef.current !== sessionId) {
-        await managerRef.current?.cancelDeviceConnection(discovered.id).catch(() => undefined);
+      if (!isConnectionTransitionCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(discovered.id, sessionId);
         return;
       }
       connectedDeviceRef.current = discovered;
       previousModeRef.current = EMPTY_TELEMETRY.mode;
-      const nextProtocol = await loadProtocol(discovered, sessionId);
-      await loadSettings(discovered, sessionId);
-      await loadDriverParams(discovered, sessionId);
-      if (!isCurrentDeviceSession(discovered, sessionId)) {
-        await managerRef.current?.cancelDeviceConnection(discovered.id).catch(() => undefined);
+      const nextProtocol = await loadProtocol(discovered, sessionId, transition);
+      if (!isForegroundBleLeaseCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(discovered.id, sessionId);
+        return;
+      }
+      await loadSettings(discovered, sessionId, transition);
+      if (!isForegroundBleLeaseCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(discovered.id, sessionId);
+        return;
+      }
+      await loadDriverParams(discovered, sessionId, transition);
+      if (!isForegroundBleLeaseCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(discovered.id, sessionId);
         return;
       }
       subscribeTelemetry(discovered, sessionId);
-      if (!isCurrentDeviceSession(discovered, sessionId)) {
-        await managerRef.current?.cancelDeviceConnection(discovered.id).catch(() => undefined);
+      if (!isForegroundBleLeaseCurrent(transition)) {
+        await cancelConnectionCandidateUnlessReplaced(discovered.id, sessionId);
         return;
       }
       setLiveSyncSessionActive(false);
@@ -844,91 +1008,149 @@ function OzealisApp() {
             : "Connected. Update the app or firmware before starting.",
       );
     } catch (error) {
-      if (deviceSessionIdRef.current !== sessionId) {
-        if (connectedForCleanup) {
-          await managerRef.current?.cancelDeviceConnection(connectedForCleanup.id).catch(() => undefined);
-        }
-        return;
-      }
-      cleanupSubscriptions();
       if (connectedForCleanup) {
-        await managerRef.current?.cancelDeviceConnection(connectedForCleanup.id).catch(() => undefined);
+        await cancelConnectionCandidateUnlessReplaced(connectedForCleanup.id, sessionId);
       }
-      resetDeviceSessionState(sessionId);
-      setMessage(actionErrorMessage(error, "Could not connect. Try pairing again.", "Connection failed."));
+      if (!isConnectionTransitionCurrent(transition)) return;
+      cleanupSubscriptions();
+      if (resetDeviceSessionState(sessionId)) {
+        setMessage(actionErrorMessage(error, "Could not connect. Try pairing again.", "Connection failed."));
+      }
     } finally {
-      if (deviceSessionIdRef.current === sessionId) setBusy(false);
+      releaseConnectionTransition(transition);
     }
   }
 
   async function startOximeterScan() {
+    if (oximeterTransitionRef.current || connectionTransitionTokenRef.current) return;
     const manager = managerRef.current;
     if (!manager || blePreviewMode) {
       setMessage(advancedMode ? "Bluetooth oximetry is available only in the Android or iOS app." : "Oximeter pairing is available in the phone app.");
       return;
     }
-    const allowed = await requestBlePermissions();
-    if (!allowed) {
-      setMessage(advancedMode ? "Bluetooth permission is required to scan for an oximeter." : "Allow Bluetooth to pair an oximeter.");
-      return;
-    }
-    if (bleState !== "PoweredOn") {
-      setMessage(advancedMode ? "Turn Bluetooth on before scanning for an oximeter." : "Turn Bluetooth on to pair an oximeter.");
-      return;
-    }
-
-    stopScan(false);
-    setScanning(false);
-    stopOximeterScan(false);
+    if (scanAdmissionRef.current?.kind === "oximeter") return;
+    const previousScanStop =
+      scanAdmissionRef.current?.kind === "ozealis"
+        ? stopScan()
+        : Promise.resolve();
+    const admission = { kind: "oximeter" as const };
+    scanAdmissionRef.current = admission;
     setOximeterScanning(true);
-    setMessage(advancedMode ? "Scanning for a Bluetooth Pulse Oximeter Service device..." : "Looking for an oximeter...");
-    manager.startDeviceScan([PLX_SERVICE_UUID], { allowDuplicates: false }, (error, device) => {
-      if (error) {
-        setMessage(actionErrorMessage(error, "Could not find an oximeter. Try again.", "Oximeter scan failed."));
-        stopOximeterScan();
+    let scanStarted = false;
+    try {
+      await previousScanStop;
+      if (
+        scanAdmissionRef.current !== admission
+        || oximeterTransitionRef.current
+        || connectionTransitionTokenRef.current
+      ) return;
+      const allowed = await requestBlePermissions();
+      if (
+        scanAdmissionRef.current !== admission
+        || oximeterTransitionRef.current
+        || connectionTransitionTokenRef.current
+      ) return;
+      if (!allowed) {
+        setMessage(advancedMode ? "Bluetooth permission is required to scan for an oximeter." : "Allow Bluetooth to pair an oximeter.");
         return;
       }
-      if (!device) return;
-      void connectOximeter(device);
-    });
+      const liveBleState = await manager.state();
+      if (
+        scanAdmissionRef.current !== admission
+        || oximeterTransitionRef.current
+        || connectionTransitionTokenRef.current
+      ) return;
+      if (liveBleState !== "PoweredOn") {
+        setMessage(advancedMode ? "Turn Bluetooth on before scanning for an oximeter." : "Turn Bluetooth on to pair an oximeter.");
+        return;
+      }
+      if (
+        scanAdmissionRef.current !== admission
+        || oximeterTransitionRef.current
+        || connectionTransitionTokenRef.current
+      ) return;
 
-    oximeterScanTimeoutRef.current = setTimeout(() => {
-      stopOximeterScan();
-      setMessage(advancedMode ? "No standard Bluetooth pulse oximeter found." : "No oximeter found.");
-    }, 12000);
+      setScanning(false);
+      setMessage(advancedMode ? "Scanning for a Bluetooth Pulse Oximeter Service device..." : "Looking for an oximeter...");
+      await manager.startDeviceScan([PLX_SERVICE_UUID], { allowDuplicates: false }, (error, device) => {
+        if (scanAdmissionRef.current !== admission) return;
+        if (error) {
+          setMessage(actionErrorMessage(error, "Could not find an oximeter. Try again.", "Oximeter scan failed."));
+          stopOximeterScan();
+          return;
+        }
+        if (
+          !device
+          || !(device.serviceUUIDs || []).some((uuid) => uuid.toLowerCase() === PLX_SERVICE_UUID)
+        ) return;
+        void connectOximeter(device);
+      });
+      if (
+        scanAdmissionRef.current !== admission
+        || oximeterTransitionRef.current
+        || connectionTransitionTokenRef.current
+      ) {
+        if (scanAdmissionRef.current === admission) {
+          void manager.stopDeviceScan().catch(() => undefined);
+        }
+        return;
+      }
+      scanStarted = true;
+      oximeterScanTimeoutRef.current = setTimeout(() => {
+        if (scanAdmissionRef.current !== admission) return;
+        stopOximeterScan();
+        setMessage(advancedMode ? "No standard Bluetooth pulse oximeter found." : "No oximeter found.");
+      }, 12000);
+    } catch (error) {
+      if (scanAdmissionRef.current === admission) {
+        setMessage(actionErrorMessage(error, "Could not find an oximeter. Try again.", "Oximeter scan failed."));
+      }
+    } finally {
+      if (!scanStarted && scanAdmissionRef.current === admission) {
+        scanAdmissionRef.current = null;
+        setOximeterScanning(false);
+        void manager.stopDeviceScan().catch(() => undefined);
+      }
+    }
   }
 
   async function connectOximeter(device: Device) {
     const manager = managerRef.current;
-    if (!manager) return;
+    if (!manager || oximeterTransitionRef.current || connectionTransitionTokenRef.current) return;
     const sessionId = oximeterSessionIdRef.current + 1;
     oximeterSessionIdRef.current = sessionId;
-    stopOximeterScan();
-    cleanupOximeterSubscriptions();
-    oximetryRelayRef.current?.clearPending();
-    const previousOximeter = oximeterDeviceRef.current;
-    oximeterDeviceRef.current = null;
-    setOximeterDevice(null);
-    setOximetrySample(null);
-    await oximetryRelayRef.current?.whenIdle();
-    if (oximeterSessionIdRef.current !== sessionId) return;
-    if (previousOximeter) {
-      await manager.cancelDeviceConnection(previousOximeter.id).catch(() => undefined);
-    }
-    if (oximeterSessionIdRef.current !== sessionId) return;
+    const transition = { operation: "connect" as const, deviceId: device.id, sessionId };
+    oximeterTransitionRef.current = transition;
+    setOximeterTransitionBusy(true);
     try {
+      void stopOximeterScan();
+      cleanupOximeterSubscriptions();
+      oximetryRelayRef.current?.clearPending();
+      const previousOximeter = oximeterDeviceRef.current;
+      oximeterDeviceRef.current = null;
+      setOximeterDevice(null);
+      setOximetrySample(null);
+      if (previousOximeter) {
+        await manager.cancelDeviceConnection(previousOximeter.id).catch(() => undefined);
+      }
+      if (
+        oximeterSessionIdRef.current !== sessionId
+        || oximeterTransitionRef.current !== transition
+      ) return;
       const connected = await device.connect({ timeout: 12000 });
-      if (oximeterSessionIdRef.current !== sessionId) {
-        if (currentOximeterDeviceId() !== connected.id) {
-          await manager.cancelDeviceConnection(connected.id).catch(() => undefined);
-        }
+      if (
+        oximeterSessionIdRef.current !== sessionId
+        || oximeterTransitionRef.current !== transition
+      ) {
+        await cancelOximeterCandidateUnlessReplaced(manager, connected.id, sessionId);
         return;
       }
       const discovered = await connected.discoverAllServicesAndCharacteristics();
-      if (oximeterSessionIdRef.current !== sessionId) {
-        if (currentOximeterDeviceId() !== discovered.id) {
-          await manager.cancelDeviceConnection(discovered.id).catch(() => undefined);
-        }
+      if (
+        oximeterSessionIdRef.current !== sessionId
+        || oximeterTransitionRef.current !== transition
+      ) {
+        await cancelOximeterCandidateUnlessReplaced(manager, discovered.id, sessionId);
         return;
       }
       oximeterDeviceRef.current = discovered;
@@ -978,49 +1200,87 @@ function OzealisApp() {
       setOximeterDevice(discovered);
       setMessage(advancedMode ? "Oximeter connected; SpO2 and pulse will be relayed while Ozealis is connected." : "Oximeter connected.");
     } catch (error) {
-      if (oximeterSessionIdRef.current !== sessionId) return;
-      await manager.cancelDeviceConnection(device.id).catch(() => undefined);
+      if (
+        oximeterSessionIdRef.current !== sessionId
+        || oximeterTransitionRef.current !== transition
+      ) return;
+      await cancelOximeterCandidateUnlessReplaced(manager, device.id, sessionId);
       cleanupOximeterSubscriptions();
       resetOximeterSessionState(sessionId);
       setMessage(actionErrorMessage(error, "Could not connect the oximeter.", "Oximeter connection failed."));
+    } finally {
+      if (oximeterTransitionRef.current === transition) {
+        oximeterTransitionRef.current = null;
+        setOximeterTransitionBusy(false);
+      }
     }
   }
 
   async function disconnectOximeter() {
-    const device = oximeterDevice;
+    if (oximeterTransitionRef.current || connectionTransitionTokenRef.current) return;
+    const device = oximeterDeviceRef.current;
+    if (!device) return;
     const sessionId = oximeterSessionIdRef.current;
-    cleanupOximeterSubscriptions();
-    if (!resetOximeterSessionState(sessionId)) return;
-    await oximetryRelayRef.current?.whenIdle();
-    if (device) await managerRef.current?.cancelDeviceConnection(device.id).catch(() => undefined);
-    setMessage("Oximeter disconnected.");
+    const transition = {
+      operation: "disconnect" as const,
+      deviceId: device.id,
+      sessionId,
+    };
+    oximeterTransitionRef.current = transition;
+    setOximeterTransitionBusy(true);
+    try {
+      void stopOximeterScan();
+      cleanupOximeterSubscriptions();
+      if (!resetOximeterSessionState(sessionId)) return;
+      await managerRef.current?.cancelDeviceConnection(device.id).catch(() => undefined);
+      if (oximeterTransitionRef.current === transition) setMessage("Oximeter disconnected.");
+    } finally {
+      if (oximeterTransitionRef.current === transition) {
+        oximeterTransitionRef.current = null;
+        setOximeterTransitionBusy(false);
+      }
+    }
   }
 
   async function disconnect() {
-    if (!connectedDevice) return;
+    if (connectionTransitionTokenRef.current) return;
+    const disconnectDevice = connectedDeviceRef.current;
+    if (!disconnectDevice) return;
     const sessionId = deviceSessionIdRef.current;
-    const deviceId = connectedDevice.id;
-    setBusy(true);
+    if (!isCurrentDeviceSession(disconnectDevice, sessionId)) return;
+    const deviceId = disconnectDevice.id;
+    foregroundBleCoordinatorRef.current!.invalidateSession(deviceId, sessionId);
+    const transition = reserveConnectionTransition("connection:disconnect", disconnectDevice, sessionId);
+    if (!transition) return;
+    void stopScan();
+    void stopOximeterScan();
+    connectedDeviceRef.current = null;
     cleanupSubscriptions();
     protocolVersionRef.current = "unknown";
-    oximetryRelayRef.current?.clearPending();
-    await oximetryRelayRef.current?.whenIdle();
     let disconnectError: unknown = null;
     let sessionReset = false;
+    let ownsCompletion = false;
     try {
       await managerRef.current?.cancelDeviceConnection(deviceId);
     } catch (error) {
       disconnectError = error;
     } finally {
-      sessionReset = resetDeviceSessionState(sessionId);
-      if (sessionReset) flushLiveSyncCsv();
+      ownsCompletion = connectionTransitionTokenRef.current === transition.token;
+      if (ownsCompletion) {
+        sessionReset = resetDeviceSessionState(sessionId);
+        if (sessionReset) flushLiveSyncCsv();
+      }
+      releaseConnectionTransition(transition);
     }
-    if (!sessionReset) return;
+    if (!ownsCompletion || !sessionReset) return;
     setMessage(disconnectError ? actionErrorMessage(disconnectError, "Disconnected.", "Disconnected locally; BLE close reported an error.") : "Disconnected.");
   }
 
   function resetDeviceSessionState(expectedSessionId = deviceSessionIdRef.current): boolean {
-    if (deviceSessionIdRef.current !== expectedSessionId) return false;
+    const nextSessionId = advanceSessionGeneration(deviceSessionIdRef.current, expectedSessionId);
+    if (nextSessionId === null) return false;
+    foregroundBleCoordinatorRef.current!.invalidateAll();
+    deviceSessionIdRef.current = nextSessionId;
     autoImportingSessionRef.current = null;
     autoImportPendingSessionRef.current = null;
     autoImportRetryCountRef.current = 0;
@@ -1054,13 +1314,42 @@ function OzealisApp() {
     );
   }
 
-  function currentOximeterDeviceId() {
-    return oximeterDeviceRef.current?.id;
+  async function cancelConnectionCandidateUnlessReplaced(
+    candidateDeviceId: string,
+    ownerSessionId: number,
+  ): Promise<void> {
+    const activeTransition = connectionTransitionTokenRef.current?.identity;
+    const replacementOwnsDevice =
+      activeTransition?.deviceId === candidateDeviceId
+      && activeTransition.sessionId !== ownerSessionId;
+    const replacementCommittedDevice =
+      connectedDeviceRef.current?.id === candidateDeviceId
+      && deviceSessionIdRef.current !== ownerSessionId;
+    if (replacementOwnsDevice || replacementCommittedDevice) return;
+    await managerRef.current?.cancelDeviceConnection(candidateDeviceId).catch(() => undefined);
+  }
+
+  async function cancelOximeterCandidateUnlessReplaced(
+    manager: BleManager,
+    candidateDeviceId: string,
+    ownerSessionId: number,
+  ): Promise<void> {
+    const activeTransition = oximeterTransitionRef.current;
+    const replacementOwnsDevice =
+      activeTransition?.deviceId === candidateDeviceId
+      && activeTransition.sessionId !== ownerSessionId;
+    const replacementCommittedDevice =
+      oximeterDeviceRef.current?.id === candidateDeviceId
+      && oximeterSessionIdRef.current !== ownerSessionId;
+    if (replacementOwnsDevice || replacementCommittedDevice) return;
+    await manager.cancelDeviceConnection(candidateDeviceId).catch(() => undefined);
   }
 
   function resetOximeterSessionState(expectedSessionId = oximeterSessionIdRef.current): boolean {
-    if (oximeterSessionIdRef.current !== expectedSessionId) return false;
-    oximeterSessionIdRef.current += 1;
+    const nextSessionId = advanceSessionGeneration(oximeterSessionIdRef.current, expectedSessionId);
+    if (nextSessionId === null) return false;
+    oximeterSessionIdRef.current = nextSessionId;
+    void stopOximeterScan();
     oximetryRelayRef.current?.clearPending();
     oximeterDeviceRef.current = null;
     setOximeterDevice(null);
@@ -1098,26 +1387,28 @@ function OzealisApp() {
     }, autoImportRetryDelayMs);
   }
 
-  function stopScan(updateState = true) {
+  function stopScan(updateState = true): Promise<void> {
     if (scanTimeoutRef.current) {
       clearTimeout(scanTimeoutRef.current);
       scanTimeoutRef.current = null;
     }
-    managerRef.current?.stopDeviceScan();
+    const ownsAdmission = scanAdmissionRef.current?.kind === "ozealis";
+    if (ownsAdmission) scanAdmissionRef.current = null;
     if (updateState) setScanning(false);
+    if (!ownsAdmission || !managerRef.current) return Promise.resolve();
+    return managerRef.current.stopDeviceScan().catch(() => undefined);
   }
 
-  function stopOximeterScan(updateState = true) {
+  function stopOximeterScan(updateState = true): Promise<void> {
     if (oximeterScanTimeoutRef.current) {
       clearTimeout(oximeterScanTimeoutRef.current);
       oximeterScanTimeoutRef.current = null;
     }
-    managerRef.current?.stopDeviceScan();
+    const ownsAdmission = scanAdmissionRef.current?.kind === "oximeter";
+    if (ownsAdmission) scanAdmissionRef.current = null;
     if (updateState) setOximeterScanning(false);
-  }
-
-  function isCurrentConnectedDevice(device: Device | null) {
-    return Boolean(device && connectedDeviceRef.current === device);
+    if (!ownsAdmission || !managerRef.current) return Promise.resolve();
+    return managerRef.current.stopDeviceScan().catch(() => undefined);
   }
 
   function isCurrentDeviceSession(device: Device | null, sessionId: number) {
@@ -1129,11 +1420,102 @@ function OzealisApp() {
     );
   }
 
-  async function loadSettings(device = connectedDevice, sessionId = deviceSessionIdRef.current) {
-    if (!device) return;
-    if (isCurrentDeviceSession(device, sessionId)) setSettingsReadbackValid(false);
+  function invalidateDeviceSessionLifecycle(): void {
+    foregroundBleCoordinatorRef.current?.invalidateAll();
+    connectedDeviceRef.current = null;
+    connectionTransitionTokenRef.current = null;
+    const nextSessionId = advanceSessionGeneration(
+      deviceSessionIdRef.current,
+      deviceSessionIdRef.current,
+    );
+    if (nextSessionId !== null) deviceSessionIdRef.current = nextSessionId;
+  }
+
+  function acquireForegroundBleLease(
+    operation: ForegroundBleOperation,
+    device = connectedDevice,
+    sessionId = deviceSessionIdRef.current,
+  ): ForegroundBleLease | null {
+    if (!device || connectionTransitionTokenRef.current) return null;
+    const token = foregroundBleCoordinatorRef.current!.acquire({
+      deviceId: device.id,
+      sessionId,
+      operation,
+    });
+    if (!token) return null;
+    return { device, sessionId, operation, token };
+  }
+
+  function reserveConnectionTransition(
+    operation: "connection:connect" | "connection:disconnect",
+    device: Device,
+    sessionId: number,
+  ): ForegroundBleLease | null {
+    if (connectionTransitionTokenRef.current) return null;
+    const token = foregroundBleCoordinatorRef.current!.reserve({
+      deviceId: device.id,
+      sessionId,
+      operation,
+    });
+    if (!token) return null;
+    connectionTransitionTokenRef.current = token;
+    setConnectionTransitionBusy(true);
+    return { device, sessionId, operation, token };
+  }
+
+  function isConnectionTransitionCurrent(lease: ForegroundBleLease): boolean {
+    return (
+      connectionTransitionTokenRef.current === lease.token
+      && deviceSessionIdRef.current === lease.sessionId
+      && foregroundBleCoordinatorRef.current!.isValid(lease.token)
+    );
+  }
+
+  function releaseConnectionTransition(lease: ForegroundBleLease): boolean {
+    const ownsTransition = connectionTransitionTokenRef.current === lease.token;
+    if (ownsTransition) {
+      connectionTransitionTokenRef.current = null;
+      setConnectionTransitionBusy(false);
+    }
+    const generationCurrent = deviceSessionIdRef.current === lease.sessionId;
+    return foregroundBleCoordinatorRef.current!.release(
+      lease.token,
+      ownsTransition && generationCurrent,
+    );
+  }
+
+  function isForegroundBleLeaseCurrent(lease: ForegroundBleLease): boolean {
+    return foregroundBleCoordinatorRef.current!.isCurrent(lease.token);
+  }
+
+  function releaseForegroundBleLease(lease: ForegroundBleLease): boolean {
+    return foregroundBleCoordinatorRef.current!.release(lease.token);
+  }
+
+  async function waitForForegroundBleTransport(lease: ForegroundBleLease): Promise<boolean> {
+    return foregroundBleCoordinatorRef.current!.waitForTransport(lease.token);
+  }
+
+  function isDeviceSessionWorkCurrent(
+    device: Device,
+    sessionId: number,
+    lease: ForegroundBleLease,
+  ): boolean {
+    return (
+      lease.device.id === device.id &&
+      lease.sessionId === sessionId &&
+      isForegroundBleLeaseCurrent(lease)
+    );
+  }
+
+  async function loadSettings(
+    device: Device,
+    sessionId: number,
+    lease: ForegroundBleLease,
+  ) {
+    if (isDeviceSessionWorkCurrent(device, sessionId, lease)) setSettingsReadbackValid(false);
     const raw = await readUtf8(device, OZEALIS_CHARACTERISTICS.settings);
-    if (!isCurrentDeviceSession(device, sessionId)) return;
+    if (!isDeviceSessionWorkCurrent(device, sessionId, lease)) return;
     const parsed = parseSettingsReadback(raw);
     if (!parsed) {
       setSettingsReadbackValid(false);
@@ -1147,48 +1529,53 @@ function OzealisApp() {
     if (!connectedDevice) return;
     const readDevice = connectedDevice;
     const sessionId = deviceSessionIdRef.current;
-    setBusy(true);
+    const lease = acquireForegroundBleLease("settings:read", readDevice, sessionId);
+    if (!lease) return;
     try {
-      await loadSettings(readDevice, sessionId);
-      if (!isCurrentDeviceSession(readDevice, sessionId)) return;
+      if (!(await waitForForegroundBleTransport(lease))) return;
+      await loadSettings(readDevice, sessionId, lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(advancedModeRef.current ? "Settings loaded from device." : "Comfort updated.");
     } catch (error) {
-      if (!isCurrentDeviceSession(readDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, "Could not update comfort.", "Could not read settings."));
     } finally {
-      if (isCurrentDeviceSession(readDevice, sessionId)) setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
-  async function loadProtocol(device = connectedDevice, sessionId = deviceSessionIdRef.current): Promise<string> {
-    if (!device) return "unknown";
+  async function loadProtocol(
+    device: Device,
+    sessionId: number,
+    lease: ForegroundBleLease,
+  ): Promise<string> {
     try {
       const raw = await readUtf8(device, OZEALIS_CHARACTERISTICS.protocol);
       const next = raw || "unknown";
-      if (!isCurrentDeviceSession(device, sessionId)) return "unknown";
+      if (!isDeviceSessionWorkCurrent(device, sessionId, lease)) return "unknown";
       protocolVersionRef.current = next;
       setProtocolVersion(next);
       return next;
     } catch {
-      if (!isCurrentDeviceSession(device, sessionId)) return "unknown";
+      if (!isDeviceSessionWorkCurrent(device, sessionId, lease)) return "unknown";
       protocolVersionRef.current = "unknown";
       setProtocolVersion("unknown");
       return "unknown";
     }
   }
 
-  async function loadDriverParams(device = connectedDevice, sessionId = deviceSessionIdRef.current) {
-    if (!device) {
-      setDriverParamsJson("");
-      return "";
-    }
+  async function loadDriverParams(
+    device: Device,
+    sessionId: number,
+    lease: ForegroundBleLease,
+  ) {
     try {
       const params = await readUtf8(device, OZEALIS_CHARACTERISTICS.mcfParams);
-      if (!isCurrentDeviceSession(device, sessionId)) return "";
+      if (!isDeviceSessionWorkCurrent(device, sessionId, lease)) return "";
       setDriverParamsJson(params);
       return params;
     } catch (error) {
-      if (!isCurrentDeviceSession(device, sessionId)) return "";
+      if (!isDeviceSessionWorkCurrent(device, sessionId, lease)) return "";
       setDriverParamsJson("");
       throw error;
     }
@@ -1209,20 +1596,27 @@ function OzealisApp() {
     return typeof messageText === "string" ? messageText : advancedModeRef.current ? messageText.advanced : messageText.simple;
   }
 
-  async function confirmProtocolBeforeWrite(messageText: ModeAwareMessage, device = connectedDevice) {
-    if (!device) return false;
-    const nextProtocol = await loadProtocol(device);
-    if (!isCurrentConnectedDevice(device)) return false;
+  async function confirmProtocolBeforeWrite(
+    messageText: ModeAwareMessage,
+    lease: ForegroundBleLease,
+  ) {
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
+    if (!(await waitForForegroundBleTransport(lease))) return false;
+    const nextProtocol = await loadProtocol(lease.device, lease.sessionId, lease);
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     if (nextProtocol === OZEALIS_PROTOCOL_VERSION) return true;
     Alert.alert(advancedModeRef.current ? "Protocol mismatch" : "Update app or firmware", modeAwareMessage(messageText));
     return false;
   }
 
-  async function confirmDriverSnapshotBeforeMotorAction(messageText: ModeAwareMessage, device = connectedDevice) {
-    if (!device) return false;
+  async function confirmDriverSnapshotBeforeMotorAction(
+    messageText: ModeAwareMessage,
+    lease: ForegroundBleLease,
+  ) {
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     try {
-      const raw = await loadDriverParams(device);
-      if (!isCurrentConnectedDevice(device)) return false;
+      const raw = await loadDriverParams(lease.device, lease.sessionId, lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return false;
       const snapshot = parseMcfParamsSnapshot(raw);
       const snapshotCommandReady =
         snapshot.driver === "MCF8316D" &&
@@ -1234,6 +1628,7 @@ function OzealisApp() {
       Alert.alert(advancedModeRef.current ? "Motor command unavailable" : "Use standby", modeAwareMessage(messageText));
       return false;
     } catch {
+      if (!isForegroundBleLeaseCurrent(lease)) return false;
       Alert.alert(
         advancedModeRef.current ? "Motor command unavailable" : "Use standby",
         advancedModeRef.current ? "Could not reread the MCF8316D parameter snapshot." : modeAwareMessage(messageText),
@@ -1266,16 +1661,17 @@ function OzealisApp() {
       setMessage(advancedMode ? "Settings adjusted to firmware limits. Review and write again." : "Comfort settings adjusted. Review and save again.");
       return;
     }
-    setBusy(true);
     const writeDevice = connectedDevice;
     const sessionId = deviceSessionIdRef.current;
+    const lease = acquireForegroundBleLease("settings:write", writeDevice, sessionId);
+    if (!lease) return;
     try {
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       if (
         !(await confirmProtocolBeforeWrite({
           advanced: "Writes require the expected Ozealis BLE protocol version.",
           simple: "This app and device do not match. Update the app or firmware, then try again.",
-        }, writeDevice))
+        }, lease))
       ) {
         return;
       }
@@ -1285,16 +1681,17 @@ function OzealisApp() {
             advanced: "Settings writes require a fresh idle, no-fault, no-calibration readback before changing pressure settings.",
             simple: "Stop airflow or setup, then try again.",
           },
-          writeDevice,
+          lease,
         ))
       ) {
         return;
       }
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setSettingsReadbackValid(false);
       await writeUtf8(writeDevice, OZEALIS_CHARACTERISTICS.settings, serializeSettings(safe));
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const settingsReadback = await readUtf8(writeDevice, OZEALIS_CHARACTERISTICS.settings);
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const confirmed = parseSettingsReadback(settingsReadback);
       const readbackValid = confirmed !== null;
       const settingsVerified = confirmed !== null && serializeSettings(confirmed) === serializeSettings(safe);
@@ -1315,11 +1712,11 @@ function OzealisApp() {
             : "Comfort saved with device adjustments.",
       );
     } catch (error) {
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setSettingsReadbackValid(false);
       setMessage(actionErrorMessage(error, "Comfort did not save. Try again from standby.", "Settings write failed."));
     } finally {
-      if (isCurrentDeviceSession(writeDevice, sessionId)) setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
@@ -1761,12 +2158,26 @@ function OzealisApp() {
       }
       return "unavailable";
     }
-    setBusy(true);
+    const lease = acquireForegroundBleLease(
+      reason === "manual" ? "logs:read:manual" : "logs:read:auto",
+      readDevice,
+      sessionId,
+    );
+    if (!lease) return "unavailable";
     try {
-      const logs = await readCsvTransfer(readDevice, OZEALIS_CHARACTERISTICS.logDownload);
-      if (!isCurrentDeviceSession(readDevice, sessionId)) return "stale";
-      const faults = await readCsvTransfer(readDevice, OZEALIS_CHARACTERISTICS.faultCsv);
-      if (!isCurrentDeviceSession(readDevice, sessionId)) return "stale";
+      if (!(await waitForForegroundBleTransport(lease))) return "stale";
+      const logs = await readCsvTransfer(
+        readDevice,
+        OZEALIS_CHARACTERISTICS.logDownload,
+        () => isForegroundBleLeaseCurrent(lease),
+      );
+      if (!isForegroundBleLeaseCurrent(lease)) return "stale";
+      const faults = await readCsvTransfer(
+        readDevice,
+        OZEALIS_CHARACTERISTICS.faultCsv,
+        () => isForegroundBleLeaseCurrent(lease),
+      );
+      if (!isForegroundBleLeaseCurrent(lease)) return "stale";
       const pair = { session: logs, fault: faults };
       validateRetainedSnapshotPair(pair);
       const validImportedRows = retainedReadbackImportedRowCount(logs.csv, faults.csv);
@@ -1794,11 +2205,11 @@ function OzealisApp() {
       );
       return validImportedRows > 0 ? "imported" : "empty";
     } catch (error) {
-      if (!isCurrentDeviceSession(readDevice, sessionId)) return "stale";
+      if (!isForegroundBleLeaseCurrent(lease)) return "stale";
       setMessage(actionErrorMessage(error, "Could not update data.", reason === "auto" ? "Automatic retained-session import failed." : "Could not read logs."));
       return "failed";
     } finally {
-      if (isCurrentDeviceSession(readDevice, sessionId)) setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
@@ -1841,23 +2252,33 @@ function OzealisApp() {
       Alert.alert("Log clear requires idle", "Stop airflow, clear active faults, and wait for calibration to finish or abort before clearing logs.");
       return;
     }
-    setBusy(true);
+    const lease = acquireForegroundBleLease("logs:clear", writeDevice, sessionId);
+    if (!lease) return;
     try {
-      if (!(await confirmProtocolBeforeWrite("Log clearing requires the expected Ozealis BLE protocol version.", writeDevice))) return;
+      if (!(await confirmProtocolBeforeWrite("Log clearing requires the expected Ozealis BLE protocol version.", lease))) return;
       if (
         !(await confirmIdleNoCalibrationBeforeWrite(
           "Log clearing requires a fresh idle, no-fault, no-calibration readback before erasing retained evidence.",
-          writeDevice,
+          lease,
         ))
       ) {
         return;
       }
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       await writeUtf8(writeDevice, OZEALIS_CHARACTERISTICS.settings, JSON.stringify({ clearLog: 1, clearFaults: 1 }));
-      const logs = await readCsvTransfer(writeDevice, OZEALIS_CHARACTERISTICS.logDownload);
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
-      const faults = await readCsvTransfer(writeDevice, OZEALIS_CHARACTERISTICS.faultCsv);
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      const logs = await readCsvTransfer(
+        writeDevice,
+        OZEALIS_CHARACTERISTICS.logDownload,
+        () => isForegroundBleLeaseCurrent(lease),
+      );
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      const faults = await readCsvTransfer(
+        writeDevice,
+        OZEALIS_CHARACTERISTICS.faultCsv,
+        () => isForegroundBleLeaseCurrent(lease),
+      );
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const pair = { session: logs, fault: faults };
       validateRetainedSnapshotPair(pair);
       const validRowsRemain = retainedReadbackImportedRowCount(logs.csv, faults.csv) > 0;
@@ -1874,10 +2295,10 @@ function OzealisApp() {
             : "Log clear requested; readback did not contain valid retained rows.",
       );
     } catch (error) {
-      if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, "Could not clear logs.", "Log clear failed."));
     } finally {
-      if (isCurrentDeviceSession(writeDevice, sessionId)) setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
@@ -1892,16 +2313,20 @@ function OzealisApp() {
       return;
     }
     const writeDevice = connectedDevice;
-    setBusy(true);
+    const sessionId = deviceSessionIdRef.current;
+    const lease = acquireForegroundBleLease("motor-fault:clear", writeDevice, sessionId);
+    if (!lease) return;
     try {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
-      if (!(await confirmProtocolBeforeWrite("Motor fault clearing requires the expected Ozealis BLE protocol version.", writeDevice))) return;
-      if (!(await confirmMotorFaultClearAvailableBeforeWrite(writeDevice))) return;
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      if (!(await confirmProtocolBeforeWrite("Motor fault clearing requires the expected Ozealis BLE protocol version.", lease))) return;
+      if (!(await confirmMotorFaultClearAvailableBeforeWrite(lease))) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       await writeUtf8(writeDevice, OZEALIS_CHARACTERISTICS.settings, JSON.stringify({ clearMotorFault: 1 }));
-      const params = await loadDriverParams(writeDevice);
-      if (!isCurrentConnectedDevice(writeDevice)) return;
-      const modeFault = await refreshModeFaultFromDevice(writeDevice);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      const params = await loadDriverParams(writeDevice, sessionId, lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      const modeFault = await refreshModeFaultFromDevice(lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const snapshot = parseMcfParamsSnapshot(params);
       const firmwareClear = modeFault.mode === "0" && modeFault.fault === "0";
       const verifiedClear = snapshot.driver === "MCF8316D" && snapshot.i2c === true && snapshot.fault === false && snapshot.commandReady && firmwareClear;
@@ -1917,10 +2342,10 @@ function OzealisApp() {
             : "Motor driver fault clear requested; MCF8316D snapshot could not verify a present driver with clear latch.",
       );
     } catch (error) {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, "Could not clear motor driver fault.", "Motor driver fault clear failed."));
     } finally {
-      setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
@@ -1963,40 +2388,46 @@ function OzealisApp() {
   async function readDriverParams() {
     if (!connectedDevice) return;
     const readDevice = connectedDevice;
-    setBusy(true);
+    const sessionId = deviceSessionIdRef.current;
+    const lease = acquireForegroundBleLease("driver:read", readDevice, sessionId);
+    if (!lease) return;
     try {
-      await loadDriverParams(readDevice);
-      if (!isCurrentConnectedDevice(readDevice)) return;
+      if (!(await waitForForegroundBleTransport(lease))) return;
+      await loadDriverParams(readDevice, sessionId, lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage("MCF8316D parameter snapshot loaded.");
     } catch (error) {
-      if (!isCurrentConnectedDevice(readDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, "Could not update device details.", "Could not read MCF8316D parameters."));
     } finally {
-      setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
-  async function refreshModeFaultFromDevice(device = connectedDevice) {
-    if (!device) return { mode: "--", fault: "--" };
+  async function refreshModeFaultFromDevice(lease: ForegroundBleLease) {
+    if (!isForegroundBleLeaseCurrent(lease)) return { mode: "--", fault: "--" };
     const [mode, fault] = await Promise.all([
-      readUtf8(device, OZEALIS_CHARACTERISTICS.mode),
-      readUtf8(device, OZEALIS_CHARACTERISTICS.fault),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.mode),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.fault),
     ]);
-    if (!isCurrentConnectedDevice(device)) return { mode: "--", fault: "--" };
+    if (!isForegroundBleLeaseCurrent(lease)) return { mode: "--", fault: "--" };
     const nextMode = parseSystemMode(mode || "");
     const nextFault = parseFaultCode(fault || "");
     setTelemetry((current) => ({ ...current, mode: nextMode, fault: nextFault, updatedAt: Date.now() }));
     return { mode: nextMode, fault: nextFault };
   }
 
-  async function confirmIdleNoCalibrationBeforeWrite(messageText: ModeAwareMessage, device = connectedDevice) {
-    if (!device) return false;
+  async function confirmIdleNoCalibrationBeforeWrite(
+    messageText: ModeAwareMessage,
+    lease: ForegroundBleLease,
+  ) {
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     const [mode, fault, calibrationStatus] = await Promise.all([
-      readUtf8(device, OZEALIS_CHARACTERISTICS.mode),
-      readUtf8(device, OZEALIS_CHARACTERISTICS.fault),
-      readUtf8(device, OZEALIS_CHARACTERISTICS.calibrationStatus),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.mode),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.fault),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.calibrationStatus),
     ]);
-    if (!isCurrentConnectedDevice(device)) return false;
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     const nextMode = parseSystemMode(mode || "");
     const nextFault = parseFaultCode(fault || "");
     const nextCalibration = parseCalibrationStatus(calibrationStatus || "{}");
@@ -2008,18 +2439,18 @@ function OzealisApp() {
       updatedAt: Date.now(),
     }));
     if (nextMode === "0" && nextFault === "0" && !nextCalibration.active) return true;
-    Alert.alert(advancedMode ? "Write unavailable" : "Use standby", modeAwareMessage(messageText));
+    Alert.alert(advancedModeRef.current ? "Write unavailable" : "Use standby", modeAwareMessage(messageText));
     return false;
   }
 
-  async function confirmMotorFaultClearAvailableBeforeWrite(device = connectedDevice) {
-    if (!device) return false;
+  async function confirmMotorFaultClearAvailableBeforeWrite(lease: ForegroundBleLease) {
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     const [mode, fault, calibrationStatus] = await Promise.all([
-      readUtf8(device, OZEALIS_CHARACTERISTICS.mode),
-      readUtf8(device, OZEALIS_CHARACTERISTICS.fault),
-      readUtf8(device, OZEALIS_CHARACTERISTICS.calibrationStatus),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.mode),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.fault),
+      readUtf8(lease.device, OZEALIS_CHARACTERISTICS.calibrationStatus),
     ]);
-    if (!isCurrentConnectedDevice(device)) return false;
+    if (!isForegroundBleLeaseCurrent(lease)) return false;
     const nextMode = parseSystemMode(mode || "");
     const nextFault = parseFaultCode(fault || "");
     const nextCalibration = parseCalibrationStatus(calibrationStatus || "{}");
@@ -2035,16 +2466,19 @@ function OzealisApp() {
     return false;
   }
 
-  async function confirmCalibrationCommandAvailableBeforeWrite(command: "capture" | "abort", device = connectedDevice) {
-    if (!device) return null;
-    const statusJson = await readUtf8(device, OZEALIS_CHARACTERISTICS.calibrationStatus);
-    if (!isCurrentConnectedDevice(device)) return null;
+  async function confirmCalibrationCommandAvailableBeforeWrite(
+    command: "capture" | "abort",
+    lease: ForegroundBleLease,
+  ) {
+    if (!isForegroundBleLeaseCurrent(lease)) return null;
+    const statusJson = await readUtf8(lease.device, OZEALIS_CHARACTERISTICS.calibrationStatus);
+    if (!isForegroundBleLeaseCurrent(lease)) return null;
     const nextCalibration = parseCalibrationStatus(statusJson || "{}");
     setTelemetry((current) => ({ ...current, calibrationStatus: statusJson || "{}", updatedAt: Date.now() }));
     if (command === "capture" && nextCalibration.active && nextCalibration.mode === "water") return nextCalibration;
     if (command === "abort" && nextCalibration.active) return nextCalibration;
     Alert.alert(
-      advancedMode ? (command === "capture" ? "Capture unavailable" : "Abort unavailable") : command === "capture" ? "Wait for the mark" : "Nothing to stop",
+      advancedModeRef.current ? (command === "capture" ? "Capture unavailable" : "Abort unavailable") : command === "capture" ? "Wait for the mark" : "Nothing to stop",
       modeAwareMessage(
         command === "capture"
           ? {
@@ -2062,6 +2496,8 @@ function OzealisApp() {
 
   async function sendOtaCommand() {
     if (!connectedDevice) return;
+    const writeDevice = connectedDevice;
+    const sessionId = deviceSessionIdRef.current;
     if (!protocolCompatible) {
       Alert.alert("Protocol mismatch", "OTA writes require the expected Ozealis BLE protocol version.");
       return;
@@ -2082,34 +2518,49 @@ function OzealisApp() {
       Alert.alert("Unsupported firmware URL", "Use an http:// or https:// firmware URL.");
       return;
     }
+    const payload: OtaCommandPayload = {
+      ssid: otaSsid,
+      password: otaPassword,
+      url: otaUrl,
+    };
+    const clearCapturedPassword = () => {
+      if (isCurrentDeviceSession(writeDevice, sessionId)) setOtaPassword("");
+    };
     Alert.alert(
       "Send OTA command?",
       "Only continue with a firmware binary you built and verified. This OTA path does not verify project-owned signatures or pinned certificates.",
       [
-        { text: "Cancel", style: "cancel", onPress: () => setOtaPassword("") },
-        { text: "Send OTA", style: "destructive", onPress: () => void writeOtaCommand() },
+        { text: "Cancel", style: "cancel", onPress: clearCapturedPassword },
+        {
+          text: "Send OTA",
+          style: "destructive",
+          onPress: () => void writeOtaCommand(writeDevice, sessionId, payload),
+        },
       ],
+      { cancelable: true, onDismiss: clearCapturedPassword },
     );
   }
 
-  async function writeOtaCommand() {
-    if (!connectedDevice) return;
-    const writeDevice = connectedDevice;
-    if (!isCurrentConnectedDevice(writeDevice)) {
-      setOtaPassword("");
-      return;
-    }
+  async function writeOtaCommand(
+    writeDevice: Device,
+    sessionId: number,
+    payload: OtaCommandPayload,
+  ) {
+    if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
+    const clearCapturedPassword = () => {
+      if (isCurrentDeviceSession(writeDevice, sessionId)) setOtaPassword("");
+    };
     if (writeGuardsRef.current.busy) {
-      setOtaPassword("");
+      clearCapturedPassword();
       return;
     }
     if (!writeGuardsRef.current.protocolCompatible) {
-      setOtaPassword("");
+      clearCapturedPassword();
       Alert.alert("Protocol mismatch", "OTA writes require the expected Ozealis BLE protocol version.");
       return;
     }
     if (writeGuardsRef.current.otaInProgress || !writeGuardsRef.current.otaAllowed) {
-      setOtaPassword("");
+      clearCapturedPassword();
       if (writeGuardsRef.current.otaInProgress) {
         Alert.alert("OTA already running", "Wait for OTA status to report OK or ERR before sending another firmware URL.");
         return;
@@ -2117,44 +2568,49 @@ function OzealisApp() {
       Alert.alert("OTA requires idle", "Stop airflow, clear active faults, and wait for calibration to finish or abort before sending OTA.");
       return;
     }
-    const nextSsid = otaSsid.trim();
-    const nextUrl = otaUrl;
-    if (!nextSsid || !otaPassword.trim() || !nextUrl) {
-      setOtaPassword("");
+    const nextSsid = payload.ssid.trim();
+    const nextUrl = payload.url;
+    if (!nextSsid || !payload.password.trim() || !nextUrl) {
+      clearCapturedPassword();
       Alert.alert("OTA fields required", "Enter SSID, password, and a firmware URL.");
       return;
     }
     if (!isSupportedOtaUrl(nextUrl)) {
-      setOtaPassword("");
+      clearCapturedPassword();
       Alert.alert("Unsupported firmware URL", "Use an http:// or https:// firmware URL.");
       return;
     }
-    setBusy(true);
+    const lease = acquireForegroundBleLease("ota:write", writeDevice, sessionId);
+    if (!lease) {
+      clearCapturedPassword();
+      return;
+    }
     try {
-      if (!(await confirmProtocolBeforeWrite("OTA writes require the expected Ozealis BLE protocol version.", writeDevice))) return;
+      if (!(await confirmProtocolBeforeWrite("OTA writes require the expected Ozealis BLE protocol version.", lease))) return;
       if (
         !(await confirmIdleNoCalibrationBeforeWrite(
           "OTA requires a fresh idle, no-fault, no-calibration readback before sending a firmware URL.",
-          writeDevice,
+          lease,
         ))
       ) {
         return;
       }
       const freshOtaStatus = parseOtaStatus(await readUtf8(writeDevice, OZEALIS_CHARACTERISTICS.otaStatus));
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setTelemetry((current) => ({ ...current, otaStatus: freshOtaStatus, updatedAt: Date.now() }));
       if (isOtaStatusInProgress(freshOtaStatus)) {
         Alert.alert("OTA already running", "Wait for OTA status to report OK or ERR before sending another firmware URL.");
         return;
       }
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       await writeUtf8(
         writeDevice,
         OZEALIS_CHARACTERISTICS.otaCommand,
-        JSON.stringify({ ssid: nextSsid, pwd: otaPassword, url: nextUrl }),
+        JSON.stringify({ ssid: nextSsid, pwd: payload.password, url: nextUrl }),
       );
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const status = parseOtaStatus(await readUtf8(writeDevice, OZEALIS_CHARACTERISTICS.otaStatus));
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setTelemetry((current) => ({ ...current, otaStatus: status, updatedAt: Date.now() }));
       setMessage(
         status === "ERR"
@@ -2164,15 +2620,18 @@ function OzealisApp() {
             : `OTA command not verified; status readback is ${status}. Check idle state and serial logs before retrying.`,
       );
     } catch {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage("OTA command failed. Check URL, Wi-Fi, idle state, and serial logs before retrying.");
     } finally {
-      setOtaPassword("");
-      setBusy(false);
+      if (isForegroundBleLeaseCurrent(lease)) setOtaPassword("");
+      releaseForegroundBleLease(lease);
     }
   }
 
-  async function sendControlCommand(command: ControlCommand) {
+  async function sendControlCommand(
+    command: ControlCommand,
+    beforeDispatch?: () => void,
+  ) {
     if (!connectedDevice) return;
     if (!protocolCompatible) {
       Alert.alert(
@@ -2197,15 +2656,17 @@ function OzealisApp() {
       );
       return;
     }
-    setBusy(true);
     const writeDevice = connectedDevice;
+    const sessionId = deviceSessionIdRef.current;
+    const lease = acquireForegroundBleLease(`control:${command}`, writeDevice, sessionId);
+    if (!lease) return;
     try {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       if (
         !(await confirmProtocolBeforeWrite({
           advanced: "Control commands require the expected Ozealis BLE protocol version.",
           simple: "This app and device do not match. Update the app or firmware, then try again.",
-        }, writeDevice))
+        }, lease))
       ) {
         return;
       }
@@ -2214,7 +2675,7 @@ function OzealisApp() {
         !(await confirmIdleNoCalibrationBeforeWrite({
           advanced: command === "prewarmStart" ? "Prewarm requires a fresh idle, no-fault, no-calibration readback." : "Start requires a fresh idle, no-fault, no-calibration readback before commanding airflow.",
           simple: command === "prewarmStart" ? "Use standby to prewarm." : "Use standby to start airflow.",
-        }, writeDevice))
+        }, lease))
       ) {
         return;
       }
@@ -2224,25 +2685,28 @@ function OzealisApp() {
           advanced:
             "Start requires a fresh MCF8316D snapshot with I2C present, an explicit clear driver fault-latch reading, and verified I2C speed-command readback or an explicit bench PWM fallback build.",
           simple: "Use standby to start airflow.",
-        }, writeDevice))
+        }, lease))
       ) {
         return;
       }
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      beforeDispatch?.();
       await writeUtf8(writeDevice, OZEALIS_CHARACTERISTICS.control, JSON.stringify({ command }));
-      const readback = await refreshModeFaultFromDevice(writeDevice);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
+      const readback = await refreshModeFaultFromDevice(lease);
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       let moduleStatusReadback = telemetry.moduleStatus;
       if (command === "prewarmStart" || command === "prewarmStop") {
         moduleStatusReadback = parseModuleStatus(await readUtf8(writeDevice, OZEALIS_CHARACTERISTICS.moduleStatus));
-        if (!isCurrentConnectedDevice(writeDevice)) return;
+        if (!isForegroundBleLeaseCurrent(lease)) return;
         setTelemetry((current) => ({ ...current, moduleStatus: moduleStatusReadback, updatedAt: Date.now() }));
       }
       setMessage(controlCommandReadbackMessage(command, readback.mode, readback.fault, moduleStatusReadback));
     } catch (error) {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, command === "start" ? "Use standby to start airflow." : command === "prewarmStart" ? "Use standby to prewarm." : "Stop from the device if needed.", `Could not send ${command} command.`));
     } finally {
-      setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
@@ -2298,8 +2762,10 @@ function OzealisApp() {
     return telemetry.hoseTemp === "--" ? "Not present" : `${telemetry.hoseTemp} C`;
   }
 
-  async function sendCalibrationCommand(command: "start" | "waterStart" | "capture" | "abort") {
+  async function sendCalibrationCommand(command: CalibrationCommand) {
     if (!connectedDevice) return;
+    const writeDevice = connectedDevice;
+    const sessionId = deviceSessionIdRef.current;
     if ((command === "start" || command === "waterStart" || command === "capture" || command === "abort") && !protocolCompatible) {
       Alert.alert(
         advancedMode ? "Protocol mismatch" : command === "waterStart" || command === "start" ? "Update app or firmware" : "Use setup when ready",
@@ -2342,22 +2808,27 @@ function OzealisApp() {
         "Clear CPAP tube is taped as a U, water is added, the machine is at least 5 cm above the water level, and a secured 20 cm+ ruler has zero aligned to the resting waterline.",
         [
           { text: "Cancel", style: "cancel" },
-          { text: "Start", onPress: () => void writeCalibrationCommand("waterStart") },
+          {
+            text: "Start",
+            onPress: () => void writeCalibrationCommand("waterStart", writeDevice, sessionId),
+          },
         ],
       );
       return;
     }
-    await writeCalibrationCommand(command);
+    await writeCalibrationCommand(command, writeDevice, sessionId);
   }
 
   function setWaterSetupCheck(key: WaterSetupKey, value: boolean) {
     setWaterSetupChecks((current) => ({ ...current, [key]: value }));
   }
 
-  async function writeCalibrationCommand(command: "start" | "waterStart" | "capture" | "abort") {
-    if (!connectedDevice) return;
-    const writeDevice = connectedDevice;
-    if (!isCurrentConnectedDevice(writeDevice)) return;
+  async function writeCalibrationCommand(
+    command: CalibrationCommand,
+    writeDevice: Device,
+    sessionId: number,
+  ) {
+    if (!isCurrentDeviceSession(writeDevice, sessionId)) return;
     if (writeGuardsRef.current.busy) return;
     if (!writeGuardsRef.current.protocolCompatible) {
       Alert.alert(
@@ -2402,7 +2873,8 @@ function OzealisApp() {
           ? { command, minAmp: 0, maxAmp: 220, stepAmp: 1, dwellMs: 1200, maxPressureCm: 20 }
         : { command };
     let before = parseCalibrationStatus(telemetry.calibrationStatus);
-    setBusy(true);
+    const lease = acquireForegroundBleLease(`calibration:${command}`, writeDevice, sessionId);
+    if (!lease) return;
     try {
       if (
         (command === "start" || command === "waterStart" || command === "capture" || command === "abort") &&
@@ -2410,7 +2882,7 @@ function OzealisApp() {
           advancedMode
             ? "Calibration requires the expected Ozealis BLE protocol version."
             : "This app and device do not match. Update the app or firmware, then try again.",
-          writeDevice,
+          lease,
         ))
       ) {
         return;
@@ -2421,7 +2893,7 @@ function OzealisApp() {
           advancedMode
             ? "Calibration start requires a fresh idle, no-fault, no-calibration readback before commanding the blower."
             : "Use standby to start setup.",
-          writeDevice,
+          lease,
         ))
       ) {
         return;
@@ -2432,32 +2904,33 @@ function OzealisApp() {
           advancedMode
             ? "Calibration start requires a fresh MCF8316D snapshot with I2C present, an explicit clear driver fault-latch reading, and verified I2C speed-command readback or an explicit bench PWM fallback build."
             : "Use standby to start setup.",
-          writeDevice,
+          lease,
         ))
       ) {
         return;
       }
       if (command === "capture" || command === "abort") {
-        const freshBefore = await confirmCalibrationCommandAvailableBeforeWrite(command, writeDevice);
+        const freshBefore = await confirmCalibrationCommandAvailableBeforeWrite(command, lease);
         if (!freshBefore) return;
         before = freshBefore;
       }
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       await writeUtf8(writeDevice, OZEALIS_CHARACTERISTICS.calibrationCommand, JSON.stringify(payload));
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       const statusJson = await readUtf8(writeDevice, OZEALIS_CHARACTERISTICS.calibrationStatus);
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setTelemetry((current) => ({ ...current, calibrationStatus: statusJson || "{}", updatedAt: Date.now() }));
       setMessage(calibrationCommandReadbackMessage(command, before, parseCalibrationStatus(statusJson)));
     } catch (error) {
-      if (!isCurrentConnectedDevice(writeDevice)) return;
+      if (!isForegroundBleLeaseCurrent(lease)) return;
       setMessage(actionErrorMessage(error, "Use standby to start setup.", "Calibration command failed."));
     } finally {
-      setBusy(false);
+      releaseForegroundBleLease(lease);
     }
   }
 
   function calibrationCommandReadbackMessage(
-    command: "start" | "waterStart" | "capture" | "abort",
+    command: CalibrationCommand,
     before: ReturnType<typeof parseCalibrationStatus>,
     after: ReturnType<typeof parseCalibrationStatus>,
   ) {
@@ -2517,7 +2990,7 @@ function OzealisApp() {
         {connectedDevice ? (
           <IconButton icon="close" label="Disconnect" onPress={disconnect} />
         ) : (
-          <IconButton icon="bluetooth" label="Scan" onPress={startScan} disabled={scanning || busy} />
+          <IconButton icon="bluetooth" label="Scan" onPress={startScan} disabled={scanning || connectionTransitionBusy || oximeterTransitionBusy || busy} />
         )}
       </View>
 
@@ -2616,7 +3089,7 @@ function OzealisApp() {
                 )}
                 <View style={styles.primaryActions}>
                   {!canUseDevice && (
-                    <ActionButton icon="bluetooth" label="Pair device" onPress={startScan} disabled={scanning || busy} fill />
+                    <ActionButton icon="bluetooth" label="Pair device" onPress={startScan} disabled={scanning || connectionTransitionBusy || oximeterTransitionBusy || busy} fill />
                   )}
                   {showSimpleStart && (
                     <ActionButton
@@ -2650,7 +3123,7 @@ function OzealisApp() {
                       icon="pulse"
                       label="Pair oximeter"
                       onPress={startOximeterScan}
-                      disabled={oximeterScanning || busy}
+                      disabled={oximeterScanning || oximeterTransitionBusy || connectionTransitionBusy || busy}
                       secondary
                     />
                   )}
@@ -2691,14 +3164,14 @@ function OzealisApp() {
                     icon="pulse"
                     label={oximeterDevice ? "Reconnect oximeter" : "Pair oximeter"}
                     onPress={startOximeterScan}
-                    disabled={oximeterScanning || busy}
+                    disabled={oximeterScanning || oximeterTransitionBusy || connectionTransitionBusy || busy}
                     secondary
                   />
                   <ActionButton
                     icon="close"
                     label="Disconnect oximeter"
                     onPress={disconnectOximeter}
-                    disabled={!oximeterDevice || busy}
+                    disabled={!oximeterDevice || oximeterTransitionBusy || connectionTransitionBusy || busy}
                     secondary
                   />
                 </View>
@@ -3096,7 +3569,7 @@ function OzealisApp() {
                 />
               )}
               {!advancedMode && !canUseDevice && (
-                <ActionButton icon="bluetooth" label="Pair device" onPress={startScan} disabled={scanning || busy} secondary />
+                <ActionButton icon="bluetooth" label="Pair device" onPress={startScan} disabled={scanning || connectionTransitionBusy || oximeterTransitionBusy || busy} secondary />
               )}
               {!advancedMode && showSimpleWaterStart && (
                 <ActionButton

@@ -37,6 +37,9 @@ jobs:
       - name: Summarize production dependency audit
         working-directory: mobile
         run: npm run audit:summary
+      - name: Test mobile operation leases
+        working-directory: mobile
+        run: npm run test:operation-lease
       - name: Test mobile validation helpers
         working-directory: mobile
         run: npm run test:validation
