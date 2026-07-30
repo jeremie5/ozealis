@@ -35,6 +35,7 @@
     "check:expo": "expo install --check",
     "test:web-export": "node ../scripts/verify-mobile-web-export.mjs",
     "typecheck": "tsc --noEmit",
+    "test:operation-lease": "node ../scripts/test-mobile-operation-lease.mjs",
     "test:validation": "node ../scripts/test-mobile-validation.mjs",
     "test:plx-oximetry": "node ../scripts/test-mobile-plx-oximetry.mjs",
     "test:csv-transfer": "node ../scripts/test-mobile-csv-transfer.mjs"

@@ -18,6 +18,7 @@ const steps = [
   ["clean mobile lockfile install", "npm", ["ci", "--ignore-scripts"], resolve(root, "mobile")],
   ["Expo dependency compatibility", "npm", ["run", "check:expo"], resolve(root, "mobile")],
   ["mobile production audit summary", "npm", ["run", "audit:summary"], resolve(root, "mobile")],
+  ["mobile operation leases", "npm", ["run", "test:operation-lease"], resolve(root, "mobile")],
   ["mobile validation helpers", "npm", ["run", "test:validation"], resolve(root, "mobile")],
   ["mobile retained CSV transfer", "npm", ["run", "test:csv-transfer"], resolve(root, "mobile")],
   ["mobile PLX oximetry parser", "npm", ["run", "test:plx-oximetry"], resolve(root, "mobile")],

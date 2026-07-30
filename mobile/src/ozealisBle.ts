@@ -1,6 +1,7 @@
 import { Buffer } from "buffer";
 import { BleManager, Characteristic, Device, Subscription } from "react-native-ble-plx";
-import { CsvTransferSnapshot, readCsvTransferWithTransport } from "./csvTransfer";
+import { readCsvTransferWithTransport } from "./csvTransfer";
+import type { CsvTransferCurrentCheck, CsvTransferSnapshot } from "./csvTransfer";
 export {
   CSV_TRANSFER_ATT_OVERHEAD_BYTES,
   CSV_TRANSFER_MAX_BYTES,
@@ -181,11 +182,15 @@ export async function writeUtf8(device: Device, characteristicUuid: string, valu
   );
 }
 
-export async function readCsvTransfer(device: Device, characteristicUuid: string): Promise<CsvTransferSnapshot> {
+export async function readCsvTransfer(
+  device: Device,
+  characteristicUuid: string,
+  isCurrent: CsvTransferCurrentCheck,
+): Promise<CsvTransferSnapshot> {
   return readCsvTransferWithTransport({
     writeRequest: (request) => writeUtf8(device, characteristicUuid, request),
     readResponse: () => readUtf8(device, characteristicUuid),
-  });
+  }, isCurrent);
 }
 
 export function subscribeText(
@@ -214,6 +219,9 @@ export function isOzealisDevice(device: Device): boolean {
 }
 
 export async function stopManager(manager: BleManager): Promise<void> {
-  manager.stopDeviceScan();
-  manager.destroy();
+  try {
+    await manager.stopDeviceScan();
+  } finally {
+    manager.destroy();
+  }
 }
