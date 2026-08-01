@@ -400,7 +400,9 @@ void runMainLogic() {
                humidTempText,
                humidRhText,
                hoseTempText);
-      dl_push(line);
+      dl_push(
+        calibrationActive ? DatalogSampleKind::Calibration : DatalogSampleKind::AirflowRun,
+        line);
     }
     lastLogMs = millis();
   }

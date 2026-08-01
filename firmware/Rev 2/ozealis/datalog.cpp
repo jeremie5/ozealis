@@ -23,17 +23,21 @@ struct DatalogSample {
   uint8_t motorFault;
   uint8_t motorI2c;
   uint8_t oximeterSource;
+  DatalogSampleKind sampleKind;
 };
 
 static constexpr size_t DATALOG_CAPACITY = 1800;
+static_assert(sizeof(DatalogSampleKind) == 1, "Retained sample kind must remain byte-sized");
 static_assert(sizeof(DatalogSample) <= 36, "Retained row exceeded the 64.8 KB heap budget");
 static constexpr int16_t OPTIONAL_NAN = INT16_MIN;
 static DatalogSample* samples = nullptr;
 static size_t sampleHead = 0;
 static size_t sampleCount = 0;
-static constexpr size_t MAX_DATALOG_ROW_LEN = 219;
+static constexpr size_t MAX_DATALOG_INPUT_ROW_LEN = 219;
+static constexpr size_t MAX_DATALOG_ROW_LEN =
+  MAX_DATALOG_INPUT_ROW_LEN + sizeof(",airflow_run") - 1;
 static constexpr char CSV_HEADER[] =
-  "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c\n";
+  "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind\n";
 static uint32_t generation = 1;
 
 static void bumpGeneration() {
@@ -81,8 +85,20 @@ static void optionalFloatText(char* out, size_t outSize, int16_t deciValue) {
   snprintf(out, outSize, "%.1f", deciValue / 10.0f);
 }
 
+static const char* sampleKindText(DatalogSampleKind sampleKind) {
+  switch (sampleKind) {
+    case DatalogSampleKind::AirflowRun:
+      return "airflow_run";
+    case DatalogSampleKind::Calibration:
+      return "calibration";
+  }
+  return nullptr;
+}
+
 static size_t formatRow(const DatalogSample& sample, char* out, size_t outSize) {
   if (!out || outSize == 0) return 0;
+  const char* sampleKind = sampleKindText(sample.sampleKind);
+  if (!sampleKind) return 0;
   char spo2Text[12];
   char pulseText[12];
   char humidTempText[12];
@@ -96,7 +112,7 @@ static size_t formatRow(const DatalogSample& sample, char* out, size_t outSize) 
   const int written = snprintf(
     out,
     outSize,
-    "%lu,%.2f,%.2f,%.2f,%.2f,%u,%.2f,%u,%u,%u,%u,%.2f,%s,%s,%u,%s,%s,%s\n",
+    "%lu,%.2f,%.2f,%.2f,%.2f,%u,%.2f,%u,%u,%u,%u,%.2f,%s,%s,%u,%s,%s,%s,%s\n",
     (unsigned long)sample.ms,
     sample.setpointCentiCm / 100.0f,
     sample.pressureCentiCm / 100.0f,
@@ -114,7 +130,8 @@ static size_t formatRow(const DatalogSample& sample, char* out, size_t outSize) 
     (unsigned)sample.oximeterSource,
     humidTempText,
     humidRhText,
-    hoseTempText);
+    hoseTempText,
+    sampleKind);
   if (written < 0 || (size_t)written >= outSize) return 0;
   return (size_t)written;
 }
@@ -135,11 +152,12 @@ void dl_init() {
   bumpGeneration();
 }
 
-void dl_push(const char* line) {
+void dl_push(DatalogSampleKind sampleKind, const char* line) {
   if (!line) return;
   if (!samples) return;
+  if (!sampleKindText(sampleKind)) return;
   const size_t len = strlen(line);
-  if (len == 0 || len > MAX_DATALOG_ROW_LEN) return;
+  if (len == 0 || len > MAX_DATALOG_INPUT_ROW_LEN) return;
   for (size_t i = 0; i < len; ++i) {
     if (line[i] == '\n' || line[i] == '\r') return;
   }
@@ -216,6 +234,7 @@ void dl_push(const char* line) {
   sample.motorFault = (uint8_t)motorFault;
   sample.motorI2c = (uint8_t)motorI2c;
   sample.oximeterSource = (uint8_t)oximeterSource;
+  sample.sampleKind = sampleKind;
   if (!samples) return;
   if (sampleCount < DATALOG_CAPACITY) {
     samples[(sampleHead + sampleCount) % DATALOG_CAPACITY] = sample;

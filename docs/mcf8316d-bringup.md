@@ -31,7 +31,7 @@ Run this sequence with external instruments available: current-limited supply, m
 - Boot the firmware and confirm the serial log reports the MCF8316D I2C target at `0x01` as present.
 - Confirm the mobile app reports Driver I2C as Present and Driver fault as Clear.
 - Confirm live CSV contains `motor_i2c=1`, `motor_fault=0`, and plausible `motor_fg_hz`; the live `motor_i2c` value comes from a periodic target probe so wiring or power fixes after boot are visible without reflashing. Start, calibration, and fault-clear gates still perform immediate readiness probes.
-- Confirm fault CSV and session CSV headers include `motorI2c`, `motorFault`, and `motorFgHz`.
+- Confirm fault CSV and session CSV headers include `motorI2c`, `motorFault`, and `motorFgHz`, and the retained session header ends with `sample_kind`.
 - Read the MCF8316D parameter snapshot from the mobile app. A default build with verified I2C speed command must report `state=readback_valid`, `runtimeSpeed=i2c`, `targetSpeed=i2c`, `commandReady=true`, and `writesAllowed=false`; a failed command-register readback must stay blocked as `register_layer_pending` or otherwise not command-ready.
 - If the driver was powered or repaired after boot, reread the MCF8316D snapshot while the blower is stopped; firmware retries a zero-speed command/readback only while idle with zero command and no driver fault, and should then recover to `commandReady=true` if the transaction is healthy.
 
@@ -71,7 +71,7 @@ Run this sequence with external instruments available: current-limited supply, m
 - Use independent pressure instrumentation and retain the raw instrument notes.
 - Keep current and temperature limits conservative for the first sweep, even if it takes longer.
 - Verify abort from the mobile app, BLE stop command, and physical button during the sweep.
-- Confirm the session CSV contains 1 Hz rows from the active calibration sweep and retains up to 30 minutes before older rows roll off.
+- Confirm the session CSV contains 1 Hz rows from the active calibration sweep with exact `sample_kind=calibration`, retains up to 30 minutes before older rows roll off, and those rows remain exportable without appearing in mobile airflow analysis.
 - Review the stored pressure curve before using it for any longer bench run.
 
 ## 8. Data To Keep

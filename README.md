@@ -39,7 +39,7 @@ That mission does not change the public boundary. Ozealis is not approved equipm
 ## Current capabilities
 
 - ESP32 firmware with pressure sensing, guarded motor-driver abstraction, fault capture, BLE telemetry, settings persistence, logs, and OTA command plumbing.
-- Bluetooth companion app with scan/connect, live telemetry, settings read/write, log/fault export, and OTA command entry.
+- Bluetooth companion app with scan/connect, live telemetry, settings read/write, log/fault export, deterministic Advanced session-report export, manual evidence archiving and neutral same-device comparisons, and OTA command entry.
 - Open hardware files, BoM, and 3D-printable enclosure parts.
 - Explicit safety and contribution boundaries for open-source collaboration.
 
@@ -61,6 +61,10 @@ Use Node.js `22.x` for mobile commands; the mobile package declares this engine 
 cd mobile
 npm ci --ignore-scripts
 npm run check:expo
+npm run test:live-evidence
+npm run test:session-report
+npm run test:graph-downsampling
+npm run test:session-archive
 npm run typecheck
 npm run test:web-export
 npm run web
@@ -69,6 +73,12 @@ npm run web
 There is no `npm run build` script. `npm run test:web-export` is a bundler smoke for browser preview only. Native BLE control requires an Expo development build because `react-native-ble-plx` does not run as a full BLE client in Expo Go or the browser.
 
 Create and install the native development client with `npm run android:dev-build`, or with `npm run ios:dev-build` from macOS for iOS. After that client is installed, `npm run android` / `npm run ios` starts Metro and launches the existing development build.
+
+Advanced Data can export a deterministic `SessionReportV1` JSON artifact from one strict, full-resolution live or retained evidence snapshot. The report binds the exact raw evidence and the derived analysis input separately with SHA-256, preserves FNV-1a transfer metadata, and summarizes cadence, gaps, optional-channel coverage, neutral heuristic output, and explicit limitations. It omits the BLE device ID, app session ID, BLE name, settings, and credentials by default. Device `ms` values are uptime, not wall-clock timestamps, and the hashes provide local artifact integrity rather than device, operator, or measurement authenticity. This experimental report is non-diagnostic and contains no clinical AHI, diagnosis, screening, treatment, efficacy, probability, or confidence output.
+
+Advanced Data also provides a manual, read-only archive for a bounded evidence capture. Each saved entry binds its exact raw CSV, exact selected airflow CSV, retained fault CSV when present, and byte-identical report JSON. A content `archiveId` deduplicates the same owner/source/evidence/report independently of save time, while a separate committed-envelope SHA-256 binds the archive timestamp and all stored metadata. The owner is represented by a domain-separated pseudonymous fingerprint rather than the raw BLE identity, but low-entropy or MAC-shaped identifiers can be dictionary-enumerated by someone with an archive or backup; this remains linkable pseudonymization, not identity protection. The app can compare factual values only between validated captures from the same pseudonymous owner, and suppresses deltas when source windows or heuristic results are not comparable.
+
+Archive restore and save are bounded to 40,000,000 bytes per entry, 256 MiB across recognized committed and pending files, and at most 250 published captures. Valid interrupted `.pending` saves are reverified and recovered; invalid or duplicate pending files are surfaced for explicit removal. A directory-level restore failure blocks new saves instead of presenting an empty archive as ready, and valid entries beyond the published limit remain on disk rather than being silently deleted. These files remain private experimental evidence in app document storage, may be included in platform backups, and do not extend the firmware's 30-minute retained window or the app's 60-minute connected live window into a full-night recorder.
 
 See [docs/mobile-app.md](docs/mobile-app.md).
 
@@ -88,7 +98,7 @@ The local source-release gate prefers `.venv/bin/python3.12` on POSIX systems or
 node scripts/verify-local.mjs
 ```
 
-This runs the BLE protocol contract, release text guard, documentation link check, mobile Simple-mode copy check, clean mobile lockfile install, Expo dependency compatibility check, mobile production audit baseline check, mobile validation tests, mobile typecheck, mobile web export smoke, firmware builds, firmware flash-budget check, and repository hygiene check.
+This runs the BLE protocol contract, release text guard, documentation link check, mobile Simple-mode copy check, clean mobile lockfile install, Expo dependency compatibility check, mobile production audit baseline check, mobile validation, evidence-preserving graph downsampling, deterministic session-report, and archive/comparison tests, mobile typecheck, mobile web export smoke, firmware builds, firmware flash-budget check, and repository hygiene check.
 
 ## BLE protocol
 

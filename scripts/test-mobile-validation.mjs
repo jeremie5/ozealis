@@ -24,6 +24,8 @@ try {
   const {
     DEFAULT_SETTINGS,
     DEFAULT_PREWARM_SCHEDULE,
+    analyzeSessionCsv,
+    analyzeSessionCsvDetails,
     csvDataRowCount,
     csvPreview,
     filterSessionCsvByDay,
@@ -120,9 +122,9 @@ try {
   assert.equal(isSameDeviceSession("device-a", 4, "device-a", 3), false);
   assert.equal(isSameDeviceSession("device-a", 4, "device-b", 4), false);
   assert.equal(isSameDeviceSession(null, 4, "device-a", 4), false);
-  assert.equal(isCompatibleDeviceSession("device-a", 4, "ozealis-ble-v2", "device-a", 4, "ozealis-ble-v2"), true);
-  assert.equal(isCompatibleDeviceSession("device-a", 4, "wrong-version", "device-a", 4, "ozealis-ble-v2"), false);
-  assert.equal(isCompatibleDeviceSession("device-a", 4, "ozealis-ble-v2", "device-a", 3, "ozealis-ble-v2"), false);
+  assert.equal(isCompatibleDeviceSession("device-a", 4, "ozealis-ble-v3", "device-a", 4, "ozealis-ble-v3"), true);
+  assert.equal(isCompatibleDeviceSession("device-a", 4, "wrong-version", "device-a", 4, "ozealis-ble-v3"), false);
+  assert.equal(isCompatibleDeviceSession("device-a", 4, "ozealis-ble-v3", "device-a", 3, "ozealis-ble-v3"), false);
   assert.equal(parseUiPreference("{\"advancedMode\":true}"), true);
   assert.equal(parseUiPreference("{\"advancedMode\":false}"), false);
   assert.equal(parseUiPreference("{\"advancedMode\":\"true\"}"), false);
@@ -975,69 +977,68 @@ try {
   assert.equal(csvDataRowCount(""), 0);
   assert.equal(csvPreview(csv, 4), "");
   const retainedCountCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "1000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "bad,row",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "1000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedCountCsv), 2);
   const retainedImpossibleStatusCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,2,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,2,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedImpossibleStatusCsv), 0);
   assert.equal(parseSessionGraphData(retainedImpossibleStatusCsv).length, 0);
   const retainedFractionalCommandCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40.5,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40.5,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedFractionalCommandCsv), 0);
   assert.equal(parseSessionGraphData(retainedFractionalCommandCsv).length, 0);
   const retainedPaddedFieldCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0, 4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0, 4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedPaddedFieldCsv), 0);
   assert.equal(parseSessionGraphData(retainedPaddedFieldCsv).length, 0);
   const retainedPaddedIntegerCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "01000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "2000,4.0,4.2,0.2,-0.4,40,0.2,40,40,01,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "01000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "2000,4.0,4.2,0.2,-0.4,40,0.2,40,40,01,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedPaddedIntegerCsv), 0);
   assert.equal(parseSessionGraphData(retainedPaddedIntegerCsv).length, 0);
   const retainedNegativeZeroIntegerCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
     "-0,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45",
-    "2000,4.0,4.2,0.2,-0.4,-0,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "2000,4.0,4.2,0.2,-0.4,-0,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedNegativeZeroIntegerCsv), 0);
   assert.equal(parseSessionGraphData(retainedNegativeZeroIntegerCsv).length, 0);
   const retainedPaddedRowCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
     " 1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedPaddedRowCsv), 0);
   assert.equal(parseSessionGraphData(retainedPaddedRowCsv).length, 0);
   const retainedPaddedHeaderCsv = [
-    " ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    " ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedPaddedHeaderCsv), 0);
   assert.equal(parseSessionGraphData(retainedPaddedHeaderCsv).length, 0);
   const retainedLeadingBlankHeaderCsv = [
     "",
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedLeadingBlankHeaderCsv), 0);
   assert.equal(parseSessionGraphData(retainedLeadingBlankHeaderCsv).length, 0);
   const retainedBlankBodyCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
     "",
-    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedBlankBodyCsv), 0);
   assert.equal(normalizeRetainedSessionCsv(retainedBlankBodyCsv), "");
@@ -1045,36 +1046,36 @@ try {
   assert.equal(csvDataRowCount(retainedExtraTrailingBlankCsv), 0);
   assert.equal(normalizeRetainedSessionCsv(retainedExtraTrailingBlankCsv), "");
   const retainedExponentFlagCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
     "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,1e0,1",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedExponentFlagCsv), 0);
   const retainedExponentAnalogCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
     "1000,4.0,4.2e0,0.2,-0.4,40,0.2,40,40,0,1",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedExponentAnalogCsv), 0);
   assert.equal(normalizeKnownCsv(retainedExponentAnalogCsv), "");
   const retainedLeadingZeroAnalogCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,04.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,04.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedLeadingZeroAnalogCsv), 0);
   assert.equal(normalizeKnownCsv(retainedLeadingZeroAnalogCsv), "");
   assert.equal(
     csvPreview(retainedCountCsv, 3),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
     ].join("\n"),
   );
   assert.equal(
     normalizeKnownCsv(retainedCountCsv),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       "",
     ].join("\n"),
   );
@@ -1083,20 +1084,20 @@ try {
   assert.equal(csvPreview(retainedCountCsv, 0), "... 3 more valid preview lines; export CSV for the complete log.");
   assert.equal(csvPreview(retainedCountCsv, Number.NaN), "... 3 more valid preview lines; export CSV for the complete log.");
   const retainedGapCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.equal(csvDataRowCount(retainedGapCsv), 2);
   assert.deepEqual(parseSessionGraphData(retainedGapCsv).map(({ ms }) => ms), [9000, 10000]);
   assert.equal(
     normalizeRetainedSessionCsv(retainedGapCsv),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       "",
     ].join("\n"),
   );
@@ -1119,9 +1120,9 @@ try {
   assert.equal(
     csvPreview(retainedGapCsv),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "9000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "10000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
     ].join("\n"),
   );
   const faultCountCsv = [
@@ -1160,7 +1161,7 @@ try {
   const faultExtraTrailingBlankCsv = `${faultCountCsv}\n\n`;
   assert.equal(csvDataRowCount(faultExtraTrailingBlankCsv), 0);
   assert.equal(normalizeFaultCsv(faultExtraTrailingBlankCsv), "");
-  const retainedHeaderOnlyCsv = "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c";
+  const retainedHeaderOnlyCsv = "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind";
   const faultHeaderOnlyCsv = "ts_ms,sys_mode,fault,vin_V,pMask_hPa,pBlower_hPa,ambient_hPa,diff_hPa,setpoint_cm,flowProxy_hPa,motorAmp,motorCmd,motorFault,motorI2c,motorFgHz,loop_us,miss1,miss2,i2cErr1,i2cErr2\n";
   assert.equal(isHeaderOnlyRetainedSessionCsv(retainedHeaderOnlyCsv), true);
   assert.equal(isHeaderOnlyFaultCsv(faultHeaderOnlyCsv), true);
@@ -1299,9 +1300,9 @@ try {
   ].join("\n");
   assert.equal(csvDataRowCount(liveCountCsv), 2);
   const retainedImportCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   const faultImportCsv = [
     "ts_ms,sys_mode,fault,vin_V,pMask_hPa,pBlower_hPa,ambient_hPa,diff_hPa,setpoint_cm,flowProxy_hPa,motorAmp,motorCmd,motorFault,motorI2c,motorFgHz,loop_us,miss1,miss2,i2cErr1,i2cErr2",
@@ -1391,16 +1392,13 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
         "bad,row",
       ].join("\n"),
-    ).map(({ ms, pressureCm, flowHpa, setpointCm, motorFgHz }) => ({ ms, pressureCm, flowHpa, setpointCm, motorFgHz })),
-    [
-      { ms: 1000, pressureCm: 4.2, flowHpa: -0.4, setpointCm: 4, motorFgHz: 123.45 },
-      { ms: 2000, pressureCm: 5.1, flowHpa: 0.3, setpointCm: 5, motorFgHz: 123.45 },
-    ],
+    ),
+    [],
   );
   assert.equal(parseSessionGraphData("h\n1,2,3,4,5\n2,3,4,5,6\n3,4,5,6,7", 2).length, 0);
   assert.equal(
@@ -1415,7 +1413,7 @@ try {
   assert.equal(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
         "1000,4.0,4.2,-0.4,40,0.2,40,40,0,1",
       ].join("\n"),
     ).length,
@@ -1424,8 +1422,8 @@ try {
   assert.equal(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,extra,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,extra,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ).length,
     0,
@@ -1451,7 +1449,7 @@ try {
   assert.equal(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
         "1000,4.0,4.2,0.2,-0.4,40,,40,40,0,1",
       ].join("\n"),
     ).length,
@@ -1460,11 +1458,11 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "900,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "1000,5.5,5.6,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "900,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "1000,5.5,5.6,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ).map(({ ms, pressureCm, flowHpa, setpointCm, motorFgHz }) => ({ ms, pressureCm, flowHpa, setpointCm, motorFgHz })),
     [
@@ -1476,10 +1474,10 @@ try {
   assert.equal(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "3000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "3000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
       2,
     ).length,
@@ -1488,11 +1486,11 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "3000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "4000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "3000,6.0,6.1,0.1,0.4,50,0.1,50,50,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "4000,7.0,7.1,0.1,0.5,55,0.1,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
       3,
     ).map(({ ms }) => ms),
@@ -1501,9 +1499,9 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
       1,
     ).map(({ ms, pressureCm, flowHpa, setpointCm, motorFgHz }) => ({ ms, pressureCm, flowHpa, setpointCm, motorFgHz })),
@@ -1512,9 +1510,9 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,97.5,62.0,1,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,97.5,62.0,1,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ).map(({ spo2Percent, pulseBpm, oximeterSource }) => ({ spo2Percent, pulseBpm, oximeterSource })),
     [
@@ -1525,8 +1523,8 @@ try {
   assert.equal(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,1,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,1,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ).length,
     0,
@@ -1534,8 +1532,8 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
       0,
     ),
@@ -1544,9 +1542,9 @@ try {
   assert.deepEqual(
     parseSessionGraphData(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
       Number.NaN,
     ).map(({ ms }) => ms),
@@ -1610,9 +1608,9 @@ try {
   );
   const retainedEnvironmentGraph = parseSessionGraphData(
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,97.5,62.0,1,24.0,45.5,29.0",
-      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,97.5,62.0,1,24.0,45.5,29.0,airflow_run",
+      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
     ].join("\n"),
   );
   assert.deepEqual(
@@ -1636,9 +1634,9 @@ try {
   assert.deepEqual(
     summarizeSessionCsv(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-        "3000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+        "3000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ),
     { rows: 2, durationSec: 3, firstMs: 1000, lastMs: 3000 },
@@ -1646,8 +1644,8 @@ try {
   assert.deepEqual(
     summarizeSessionCsv(
       [
-        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+        "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+        "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       ].join("\n"),
     ),
     { rows: 1, durationSec: 1, firstMs: 1000, lastMs: 1000 },
@@ -1684,44 +1682,186 @@ try {
     }),
   ].join("\n");
   const retainedCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.deepEqual(selectSessionAnalysisCsv(liveCsv, retainedCsv, true), {
     csv: retainedCsv,
+    kind: "retained",
     source: "Retained 1 Hz firmware session",
   });
   assert.deepEqual(selectSessionAnalysisCsv(liveAnalysisCsv, retainedCsv, true), {
     csv: liveAnalysisCsv,
+    kind: "live",
     source: "Live 10 Hz app sync",
   });
   assert.deepEqual(selectSessionAnalysisCsv("bad\n1,2,3", retainedCsv, true), {
     csv: retainedCsv,
+    kind: "retained",
     source: "Retained 1 Hz firmware session",
   });
   assert.deepEqual(selectSessionAnalysisCsv(liveCsv, retainedCsv, false), {
     csv: retainedCsv,
+    kind: "retained",
     source: "Retained 1 Hz firmware session",
   });
   assert.deepEqual(selectSessionAnalysisCsv("", retainedCsv, true), {
     csv: retainedCsv,
+    kind: "retained",
     source: "Retained 1 Hz firmware session",
   });
   assert.deepEqual(selectSessionAnalysisCsv("", "", false), {
     csv: "",
+    kind: "none",
     source: "--",
   });
   assert.deepEqual(selectSessionAnalysisCsv("", "bad\n1,2,3", false), {
     csv: "",
+    kind: "none",
     source: "--",
   });
 
+  const typedRetainedHeader =
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind";
+  const typedRetainedRow = (ms, sampleKind, flowHpa = 0.3, errorCm = 0.1, controllerAmp = 45) =>
+    `${ms},5.0,5.1,${errorCm},${flowHpa},${controllerAmp},${errorCm},${controllerAmp},${controllerAmp},0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,${sampleKind}`;
+
+  const calibrationOnlyCsv = [
+    typedRetainedHeader,
+    typedRetainedRow(1000, "calibration", 0.01),
+    typedRetainedRow(2000, "calibration", 0.01),
+  ].join("\n");
+  assert.equal(csvDataRowCount(calibrationOnlyCsv), 2);
+  assert.equal(csvPreview(calibrationOnlyCsv), calibrationOnlyCsv);
+  assert.equal(normalizeKnownCsv(calibrationOnlyCsv), `${calibrationOnlyCsv}\n`);
+  assert.equal(normalizeRetainedSessionCsv(calibrationOnlyCsv), `${calibrationOnlyCsv}\n`);
+  assert.equal(normalizeRetainedSessionSnapshot(calibrationOnlyCsv), calibrationOnlyCsv);
+  assert.deepEqual(parseSessionGraphData(calibrationOnlyCsv), []);
+  assert.deepEqual(summarizeSessionCsv(calibrationOnlyCsv), { rows: 0, durationSec: 0, firstMs: 0, lastMs: 0 });
+  assert.deepEqual(listSessionDayOptions(calibrationOnlyCsv), []);
+  assert.equal(filterSessionCsvByDay(calibrationOnlyCsv, "day-0"), "");
+  assert.deepEqual(selectSessionAnalysisCsv("", calibrationOnlyCsv, false), { csv: "", kind: "none", source: "--" });
+  assert.deepEqual(analyzeSessionCsv(calibrationOnlyCsv), {
+    status: "unavailable",
+    rows: 0,
+    durationSec: 0,
+    observations: [],
+    evidenceBasis: "The retained evidence contains no airflow_run samples.",
+  });
+  assert.deepEqual(flagSessionObservations(calibrationOnlyCsv), []);
+
+  const mixedBoundaryCsv = [
+    typedRetainedHeader,
+    typedRetainedRow(0, "airflow_run", 2.0),
+    typedRetainedRow(1000, "calibration", 0.01),
+    typedRetainedRow(2000, "airflow_run", 0.4),
+    typedRetainedRow(3000, "airflow_run", 0.3),
+  ].join("\n");
+  const mixedBoundaryAirflowCsv = [
+    typedRetainedHeader,
+    typedRetainedRow(2000, "airflow_run", 0.4),
+    typedRetainedRow(3000, "airflow_run", 0.3),
+  ].join("\n");
+  assert.equal(csvDataRowCount(mixedBoundaryCsv), 4);
+  assert.equal(csvPreview(mixedBoundaryCsv), mixedBoundaryCsv);
+  assert.equal(normalizeRetainedSessionCsv(mixedBoundaryCsv), `${mixedBoundaryCsv}\n`);
+  assert.equal(normalizeRetainedSessionSnapshot(mixedBoundaryCsv), mixedBoundaryCsv);
+  assert.deepEqual(parseSessionGraphData(mixedBoundaryCsv).map(({ ms }) => ms), [2000, 3000]);
+  assert.deepEqual(summarizeSessionCsv(mixedBoundaryCsv), { rows: 2, durationSec: 2, firstMs: 2000, lastMs: 3000 });
+  assert.deepEqual(listSessionDayOptions(mixedBoundaryCsv), [{ key: "day-0", label: "Latest day", rows: 2 }]);
+  assert.equal(filterSessionCsvByDay(mixedBoundaryCsv, "day-0"), `${mixedBoundaryAirflowCsv}\n`);
+  assert.deepEqual(selectSessionAnalysisCsv("", mixedBoundaryCsv, false), {
+    csv: mixedBoundaryAirflowCsv,
+    kind: "retained",
+    source: "Retained 1 Hz firmware session",
+  });
+  assert.equal(analyzeSessionCsv(mixedBoundaryCsv).status, "insufficient");
+  assert.equal(analyzeSessionCsv(mixedBoundaryCsv).rows, 2);
+  assert.deepEqual(flagSessionObservations(mixedBoundaryCsv), []);
+
+  const calibrationThenStableAirflowCsv = [
+    typedRetainedHeader,
+    ...Array.from({ length: 12 }, (_, index) => typedRetainedRow(index * 1000, "calibration", 0.01, 2.0, 80)),
+    ...Array.from({ length: 20 }, (_, index) => typedRetainedRow((12 + index) * 1000, "airflow_run", 2.0)),
+  ].join("\n");
+  assert.equal(csvDataRowCount(calibrationThenStableAirflowCsv), 32);
+  assert.ok(csvPreview(calibrationThenStableAirflowCsv).includes(",calibration"));
+  assert.ok(csvPreview(calibrationThenStableAirflowCsv).includes(",airflow_run"));
+  assert.equal(parseSessionGraphData(calibrationThenStableAirflowCsv).length, 20);
+  assert.deepEqual(summarizeSessionCsv(calibrationThenStableAirflowCsv), {
+    rows: 20,
+    durationSec: 20,
+    firstMs: 12000,
+    lastMs: 31000,
+  });
+  assert.equal(filterSessionCsvByDay(calibrationThenStableAirflowCsv, "day-0").includes(",calibration"), false);
+  assert.equal(selectSessionAnalysisCsv("", calibrationThenStableAirflowCsv, false).csv.includes(",calibration"), false);
+  assert.deepEqual(analyzeSessionCsv(calibrationThenStableAirflowCsv), {
+    status: "analyzed",
+    rows: 20,
+    durationSec: 20,
+    observations: [],
+    evidenceBasis: "Flow-proxy intervals were evaluated against the session's 75th-percentile absolute-flow baseline (2.0 hPa).",
+  });
+
+  const insufficientAirflowCsv = [
+    typedRetainedHeader,
+    ...Array.from({ length: 19 }, (_, index) => typedRetainedRow(index * 1000, "airflow_run", 2.0)),
+  ].join("\n");
+  assert.deepEqual(analyzeSessionCsv(insufficientAirflowCsv), {
+    status: "insufficient",
+    rows: 19,
+    durationSec: 19,
+    observations: [],
+    evidenceBasis: "At least 20s and 20 airflow samples are required for interval analysis.",
+  });
+  const unusableBaselineCsv = [
+    typedRetainedHeader,
+    ...Array.from({ length: 20 }, (_, index) => typedRetainedRow(index * 1000, "airflow_run", 0.01)),
+  ].join("\n");
+  assert.equal(analyzeSessionCsv(unusableBaselineCsv).status, "insufficient");
+  assert.match(analyzeSessionCsv(unusableBaselineCsv).evidenceBasis, /usable baseline/);
+  const globallySparseAirflowCsv = [
+    typedRetainedHeader,
+    ...Array.from({ length: 20 }, (_, index) => typedRetainedRow(index * 2500, "airflow_run", 2.0)),
+  ].join("\n");
+  assert.equal(analyzeSessionCsv(globallySparseAirflowCsv).status, "insufficient");
+  assert.match(analyzeSessionCsv(globallySparseAirflowCsv).evidenceBasis, /too sparse/);
+
+  for (const sampleKind of ["Airflow_run", "airflow-run", "service", "calibration ", "", "airflow_run,extra"]) {
+    const foreignKindCsv = [
+      typedRetainedHeader,
+      typedRetainedRow(1000, "airflow_run"),
+      typedRetainedRow(2000, sampleKind),
+    ].join("\n");
+    assert.equal(csvDataRowCount(foreignKindCsv), 0, `foreign sample kind ${JSON.stringify(sampleKind)} must fail row counting`);
+    assert.equal(csvPreview(foreignKindCsv), "", `foreign sample kind ${JSON.stringify(sampleKind)} must fail preview`);
+    assert.equal(normalizeKnownCsv(foreignKindCsv), "", `foreign sample kind ${JSON.stringify(sampleKind)} must fail normalization`);
+    assert.equal(normalizeRetainedSessionSnapshot(foreignKindCsv), null, `foreign sample kind ${JSON.stringify(sampleKind)} must fail snapshots`);
+    assert.deepEqual(parseSessionGraphData(foreignKindCsv), [], `foreign sample kind ${JSON.stringify(sampleKind)} must fail graphing`);
+    assert.deepEqual(summarizeSessionCsv(foreignKindCsv), { rows: 0, durationSec: 0, firstMs: 0, lastMs: 0 });
+    assert.deepEqual(listSessionDayOptions(foreignKindCsv), []);
+    assert.equal(filterSessionCsvByDay(foreignKindCsv, "day-0"), "");
+    assert.deepEqual(selectSessionAnalysisCsv("", foreignKindCsv, false), { csv: "", kind: "none", source: "--" });
+    assert.equal(analyzeSessionCsv(foreignKindCsv).status, "unavailable");
+  }
+
+  const legacyUntypedRetainedCsv = [
+    typedRetainedHeader.replace(",sample_kind", ""),
+    typedRetainedRow(1000, "airflow_run").replace(",airflow_run", ""),
+  ].join("\n");
+  assert.equal(csvDataRowCount(legacyUntypedRetainedCsv), 0);
+  assert.equal(csvPreview(legacyUntypedRetainedCsv), "");
+  assert.equal(normalizeRetainedSessionCsv(legacyUntypedRetainedCsv), "");
+  assert.equal(normalizeRetainedSessionSnapshot(legacyUntypedRetainedCsv), null);
+  assert.equal(analyzeSessionCsv(legacyUntypedRetainedCsv).status, "unavailable");
+
   const multiDayCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "0,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "0,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
     ...Array.from({ length: 86402 }, (_, index) => {
       const ms = (index + 1) * 1000;
-      return `${ms},5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`;
+      return `${ms},5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`;
     }),
   ].join("\n");
   assert.deepEqual(listSessionDayOptions(multiDayCsv), [
@@ -1737,27 +1877,27 @@ try {
   assert.equal(
     filterSessionCsvByDay(multiDayCsv, "day-1"),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "0,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "1000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "0,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "1000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "2000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       "",
     ].join("\n"),
   );
   const dayGapCsv = [
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "2000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "9000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-    "10000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+    "1000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "2000,4.0,4.2,0.2,-0.4,40,0.2,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "9000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+    "10000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
   ].join("\n");
   assert.deepEqual(listSessionDayOptions(dayGapCsv), [{ key: "day-0", label: "Latest day", rows: 2 }]);
   assert.equal(
     filterSessionCsvByDay(dayGapCsv, "day-0"),
     [
-      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c",
-      "9000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
-      "10000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN",
+      "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind",
+      "9000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+      "10000,5.0,5.1,0.1,0.3,45,0.1,45,45,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
       "",
     ].join("\n"),
   );
@@ -1766,41 +1906,107 @@ try {
   assert.equal(filterSessionCsvByDay(multiDayCsv, "not-a-day"), filterSessionCsvByDay(multiDayCsv, "day-0"));
 
   const sessionHeader =
-    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c";
-  const obstructiveRows = [
+    "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind";
+  const responsiveLowFlowRows = [
     sessionHeader,
-    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
-    ...Array.from({ length: 12 }, (_, index) => `${(20 + index) * 1000},8,6.5,1.5,0.02,55,1.5,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
+    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 12 }, (_, index) => `${(20 + index) * 1000},8,6.5,1.5,0.02,55,1.5,55,55,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
   ].join("\n");
-  const obstructiveFlags = flagSessionObservations(obstructiveRows);
-  assert.equal(obstructiveFlags.length, 1);
-  assert.equal(obstructiveFlags[0].type, "possible obstructive low-flow pattern");
-  assert.equal(obstructiveFlags[0].durationSec, 12);
+  const responsiveLowFlowFlags = flagSessionObservations(responsiveLowFlowRows);
+  assert.equal(responsiveLowFlowFlags.length, 1);
+  assert.equal(responsiveLowFlowFlags[0].type, "low-flow with pressure/controller response");
+  assert.equal(responsiveLowFlowFlags[0].durationSec, 12);
+  assert.match(responsiveLowFlowFlags[0].evidenceBasis, /pressure-tracking deviation/);
+  assert.equal("confidence" in responsiveLowFlowFlags[0], false);
+  assert.equal("basis" in responsiveLowFlowFlags[0], false);
+  assert.equal(analyzeSessionCsv(responsiveLowFlowRows).status, "analyzed");
 
-  const centralRows = [
+  const stableResponseLowFlowRows = [
     sessionHeader,
-    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
-    ...Array.from({ length: 10 }, (_, index) => `${(20 + index) * 1000},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
+    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 10 }, (_, index) => `${(20 + index) * 1000},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
   ].join("\n");
-  const centralFlags = flagSessionObservations(centralRows);
-  assert.equal(centralFlags.length, 1);
-  assert.equal(centralFlags[0].type, "possible central-like low-flow pattern");
+  const stableResponseLowFlowFlags = flagSessionObservations(stableResponseLowFlowRows);
+  assert.equal(stableResponseLowFlowFlags.length, 1);
+  assert.equal(stableResponseLowFlowFlags[0].type, "low-flow without strong controller response");
+  assert.match(stableResponseLowFlowFlags[0].evidenceBasis, /stable pressure tracking/);
+  assert.equal(analyzeSessionCsv(stableResponseLowFlowRows).status, "analyzed");
 
   const noBaselineRows = [
     sessionHeader,
-    ...Array.from({ length: 10 }, (_, index) => `${index * 1000},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
-    ...Array.from({ length: 20 }, (_, index) => `${(10 + index) * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
+    ...Array.from({ length: 10 }, (_, index) => `${index * 1000},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 20 }, (_, index) => `${(10 + index) * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
   ].join("\n");
   const noBaselineFlags = flagSessionObservations(noBaselineRows);
   assert.equal(noBaselineFlags.length, 1);
-  assert.equal(noBaselineFlags[0].type, "indeterminate low-flow pattern");
+  assert.equal(noBaselineFlags[0].type, "indeterminate low-flow window");
+  assert.match(noBaselineFlags[0].evidenceBasis, /limited control-response evidence/);
+
+  const partialReductionRows = [
+    sessionHeader,
+    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 10 }, (_, index) => `${(20 + index) * 1000},8,8,0.1,0.6,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+  ].join("\n");
+  const partialReductionFlags = flagSessionObservations(partialReductionRows);
+  assert.equal(partialReductionFlags.length, 1);
+  assert.equal(partialReductionFlags[0].type, "partial low-flow reduction");
+
+  const locallySparseLowFlowRows = [
+    sessionHeader,
+    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 5 }, (_, index) => `${20000 + index * 2500},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+  ].join("\n");
+  assert.equal(analyzeSessionCsv(locallySparseLowFlowRows).status, "insufficient");
+  assert.match(analyzeSessionCsv(locallySparseLowFlowRows).evidenceBasis, /too sparsely sampled/);
+  assert.deepEqual(flagSessionObservations(locallySparseLowFlowRows), []);
+  assert.match(partialReductionFlags[0].evidenceBasis, /flow proxy reduced/);
+
+  const mixedCandidateBaselineRows = Array.from(
+    { length: 20 },
+    (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`,
+  );
+  const mixedCandidateValidRows = Array.from(
+    { length: 10 },
+    (_, index) => `${(20 + index) * 1000},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`,
+  );
+  const validCandidateOnlyRows = [
+    sessionHeader,
+    ...mixedCandidateBaselineRows,
+    ...mixedCandidateValidRows,
+    "30000,8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run",
+  ].join("\n");
+  assert.equal(analyzeSessionCsv(validCandidateOnlyRows).status, "analyzed");
+  assert.equal(analyzeSessionCsv(validCandidateOnlyRows).observations.length, 1);
+
+  const validThenSparseCandidateRows = [
+    validCandidateOnlyRows,
+    ...Array.from(
+      { length: 5 },
+      (_, index) => `${31000 + index * 2500},8,8,0.2,0.02,41,0.2,41,41,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`,
+    ),
+  ].join("\n");
+  const validThenSparseCandidateAnalysis = analyzeSessionCsvDetails(validThenSparseCandidateRows);
+  assert.ok(
+    validThenSparseCandidateAnalysis.rows / validThenSparseCandidateAnalysis.durationSec >= 0.8,
+    "the complete evidence selection must meet the average-rate gate",
+  );
+  assert.equal(validThenSparseCandidateAnalysis.status, "insufficient");
+  assert.equal(validThenSparseCandidateAnalysis.reasonCode, "candidate_rate_too_low");
+  assert.deepEqual(
+    validThenSparseCandidateAnalysis.observations,
+    [],
+    "one sparse candidate must suppress every observation instead of returning a partial analysis",
+  );
+  assert.deepEqual(flagSessionObservations(validThenSparseCandidateRows), []);
 
   const shortRows = [
     sessionHeader,
-    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
-    ...Array.from({ length: 9 }, (_, index) => `${(20 + index) * 1000},8,8,0.1,0.02,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
+    ...Array.from({ length: 20 }, (_, index) => `${index * 1000},8,8,0.1,2.0,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
+    ...Array.from({ length: 9 }, (_, index) => `${(20 + index) * 1000},8,8,0.1,0.02,40,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN,airflow_run`),
   ].join("\n");
   assert.equal(flagSessionObservations(shortRows).length, 0);
+  assert.equal(analyzeSessionCsv(shortRows).status, "analyzed");
+  assert.deepEqual(analyzeSessionCsv(shortRows).observations, []);
 
   const liveObservationHeader =
     "ms,setpoint_hPa,pressure_hPa,flow_hPa,vin,mode,measured_cm,error_cm,controller_amp,motor_cmd,motor_fault,motor_i2c,motor_fg_hz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c";
@@ -1810,6 +2016,7 @@ try {
     ...Array.from({ length: 99 }, (_, index) => `${(200 + index) * 100},7.85,7.85,0.02,24,2,8,0.1,40,40,0,1,123.45,NAN,NAN,0,NAN,NAN,NAN`),
   ].join("\n");
   assert.equal(flagSessionObservations(liveShortRows).length, 0);
+  assert.equal(analyzeSessionCsv(liveShortRows).status, "analyzed");
 
   const liveTenSecondRows = [
     liveObservationHeader,

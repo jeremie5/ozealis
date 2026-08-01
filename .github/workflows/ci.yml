@@ -40,6 +40,18 @@ jobs:
       - name: Test mobile operation leases
         working-directory: mobile
         run: npm run test:operation-lease
+      - name: Test mobile graph downsampling
+        working-directory: mobile
+        run: npm run test:graph-downsampling
+      - name: Test mobile live evidence
+        working-directory: mobile
+        run: npm run test:live-evidence
+      - name: Test deterministic mobile session report
+        working-directory: mobile
+        run: npm run test:session-report
+      - name: Test mobile session archive and comparison
+        working-directory: mobile
+        run: npm run test:session-archive
       - name: Test mobile validation helpers
         working-directory: mobile
         run: npm run test:validation

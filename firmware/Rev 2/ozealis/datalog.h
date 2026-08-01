@@ -3,8 +3,13 @@
 #include <Arduino.h>
 #include <CircularBuffer.hpp>
 
+enum class DatalogSampleKind : uint8_t {
+  AirflowRun = 0,
+  Calibration = 1,
+};
+
 void dl_init();
-void dl_push(const char* csvLine);  // call every second
+void dl_push(DatalogSampleKind sampleKind, const char* csvLine);  // call every second
 size_t dl_csvSize();
 uint32_t dl_csvHash();
 uint32_t dl_generation();

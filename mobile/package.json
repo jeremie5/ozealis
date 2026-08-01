@@ -9,6 +9,7 @@
     "@expo/vector-icons": "^15.1.1",
     "buffer": "^6.0.3",
     "expo": "~56.0.18",
+    "expo-crypto": "~56.0.4",
     "expo-dev-client": "~56.0.24",
     "expo-file-system": "^56.0.8",
     "expo-sharing": "^56.0.18",
@@ -36,6 +37,10 @@
     "test:web-export": "node ../scripts/verify-mobile-web-export.mjs",
     "typecheck": "tsc --noEmit",
     "test:operation-lease": "node ../scripts/test-mobile-operation-lease.mjs",
+    "test:graph-downsampling": "node ../scripts/test-mobile-graph-downsampling.mjs",
+    "test:live-evidence": "node ../scripts/test-mobile-live-evidence.mjs",
+    "test:session-report": "node ../scripts/test-mobile-session-report.mjs",
+    "test:session-archive": "node ../scripts/test-mobile-session-archive.mjs",
     "test:validation": "node ../scripts/test-mobile-validation.mjs",
     "test:plx-oximetry": "node ../scripts/test-mobile-plx-oximetry.mjs",
     "test:csv-transfer": "node ../scripts/test-mobile-csv-transfer.mjs"
