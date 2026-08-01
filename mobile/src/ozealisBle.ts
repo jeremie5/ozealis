@@ -22,6 +22,7 @@ export {
   DEFAULT_PREWARM_SCHEDULE,
   DEFAULT_SETTINGS,
   THERAPY_MODE_LABELS,
+  analyzeSessionCsv,
   csvDataRowCount,
   csvPreview,
   filterSessionCsvByDay,
@@ -69,10 +70,10 @@ export {
   settingLimitMessages,
   summarizeSessionCsv,
 } from "./validation";
-export type { OzealisSettings, PrewarmSchedule, RetainedImportManifest, SessionDayOption, SessionGraphPoint, SessionObservation, SessionSummary, TherapyMode } from "./validation";
+export type { OzealisSettings, PrewarmSchedule, RetainedImportManifest, RetainedSampleKind, SessionAnalysisResult, SessionAnalysisStatus, SessionDayOption, SessionGraphPoint, SessionObservation, SessionSummary, TherapyMode } from "./validation";
 
 export const OZEALIS_SERVICE_UUID = "7f2d5f4a-0f4d-4a1f-9f84-0c2a6b3d0000";
-export const OZEALIS_PROTOCOL_VERSION = "ozealis-ble-v2";
+export const OZEALIS_PROTOCOL_VERSION = "ozealis-ble-v3";
 
 export const OZEALIS_CHARACTERISTICS = {
   pressure: uuid16("0001"),

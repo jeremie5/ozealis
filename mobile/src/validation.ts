@@ -97,7 +97,34 @@ export type SessionSummary = {
 
 export type SessionAnalysisSelection = {
   csv: string;
+  kind: "live" | "retained" | "none";
   source: "Live 10 Hz app sync" | "Retained 1 Hz firmware session" | "--";
+};
+
+export type SessionAnalysisStatus = "unavailable" | "insufficient" | "analyzed";
+
+export type SessionAnalysisReasonCode =
+  | "no_evidence_source"
+  | "no_airflow_samples"
+  | "minimum_window_not_met"
+  | "average_rate_too_low"
+  | "flow_baseline_unusable"
+  | "candidate_rate_too_low"
+  | "complete";
+
+export type SessionAnalysisResult = {
+  status: SessionAnalysisStatus;
+  rows: number;
+  durationSec: number;
+  observations: SessionObservation[];
+  evidenceBasis: string;
+};
+
+export type SessionAnalysisDetails = SessionAnalysisResult & {
+  reasonCode: SessionAnalysisReasonCode;
+  baselineAbsFlowHpa: number | null;
+  nearZeroAbsFlowHpa: number | null;
+  reductionAbsFlowHpa: number | null;
 };
 
 export type SessionDayOption = {
@@ -106,20 +133,54 @@ export type SessionDayOption = {
   rows: number;
 };
 
+export type RetainedSampleKind = "airflow_run" | "calibration";
+
+export type SessionEvidenceFormat = "live" | "retained";
+
+export type SessionEvidenceSample = {
+  ms: number;
+  setpointCm: number;
+  pressureCm: number;
+  errorCm: number;
+  flowHpa: number;
+  motorAmplitude: number | null;
+  motorCommand: number;
+  controllerErrorCm: number;
+  controllerAmp: number;
+  motorFgHz: number;
+  spo2Percent?: number | null;
+  pulseBpm?: number | null;
+  oximeterSource?: number;
+  humidifierTempC?: number | null;
+  humidifierRhPercent?: number | null;
+  hoseTempC?: number | null;
+};
+
+export type SessionEvidenceInspection = {
+  format: SessionEvidenceFormat;
+  inputRows: number;
+  airflowRunRows: number;
+  calibrationRows: number;
+  segmentCount: number;
+  selectedRows: number;
+  discardedAirflowRows: number;
+  selectedCsv: string;
+  samples: SessionEvidenceSample[];
+};
+
 export type SessionObservationType =
-  | "possible obstructive low-flow pattern"
-  | "possible central-like low-flow pattern"
-  | "possible hypopnea-like low-flow pattern"
-  | "indeterminate low-flow pattern";
+  | "partial low-flow reduction"
+  | "low-flow with pressure/controller response"
+  | "low-flow without strong controller response"
+  | "indeterminate low-flow window";
 
 export type SessionObservation = {
   startMs: number;
   endMs: number;
   durationSec: number;
   type: SessionObservationType;
-  confidence: "low" | "medium";
   flowDropPercent: number;
-  basis: string;
+  evidenceBasis: string;
 };
 
 export type McfParamsSnapshot = {
@@ -191,11 +252,15 @@ export const THERAPY_MODE_LABELS = [
 const LIVE_SESSION_HEADER =
   "ms,setpoint_hPa,pressure_hPa,flow_hPa,vin,mode,measured_cm,error_cm,controller_amp,motor_cmd,motor_fault,motor_i2c,motor_fg_hz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c";
 const RETAINED_SESSION_HEADER =
-  "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c";
+  "ms,setpoint_cm,pressure_cmH2O,error_cmH2O,flowProxy_hPa,motorAmp,controller_error_cm,controller_amp,motorCmd,motorFault,motorI2c,motorFgHz,spo2_percent,pulse_bpm,oximeter_source,humidifier_temp_c,humidifier_rh_percent,hose_temp_c,sample_kind";
 const FAULT_CSV_HEADER =
   "ts_ms,sys_mode,fault,vin_V,pMask_hPa,pBlower_hPa,ambient_hPa,diff_hPa,setpoint_cm,flowProxy_hPa,motorAmp,motorCmd,motorFault,motorI2c,motorFgHz,loop_us,miss1,miss2,i2cErr1,i2cErr2";
 const LIVE_MAX_SAMPLE_GAP_MS = 1000;
 const LIVE_MIN_ANALYSIS_ROWS = 10;
+const MIN_AIRFLOW_ANALYSIS_ROWS = 20;
+const MIN_AIRFLOW_ANALYSIS_DURATION_SEC = 20;
+const MIN_AIRFLOW_ANALYSIS_SAMPLE_RATE_HZ = 0.8;
+const MAX_ANALYSIS_SAMPLE_PERIOD_MS = 1000;
 const RETAINED_MAX_SAMPLE_GAP_MS = 2500;
 const RETAINED_TRANSFER_MAX_BYTES = 512000;
 
@@ -446,6 +511,11 @@ export function isValidLiveCsvRow(raw: string): boolean {
   if (!validOximetryCsvTriplet(parts, 13) || !validEnvironmentCsvTriplet(parts, 16)) return false;
   return parts.every((part, index) => {
     if (index === 0) return boundedCsvInteger(part, 0, Number.MAX_SAFE_INTEGER);
+    if (index === 1) return boundedCsvNumber(part, 0, 25);
+    if (index === 2 || index === 6) return boundedCsvNumber(part, -25, 25);
+    if (index === 3) return boundedCsvNumber(part, -1_000, 1_000);
+    if (index === 4) return boundedCsvNumber(part, 0, 60);
+    if (index === 7) return boundedCsvNumber(part, -50, 50);
     if (index === 5) return boundedCsvInteger(part, 0, 4);
     if (index === 8) return boundedCsvInteger(part, 0, 255);
     if (index === 9) return boundedCsvInteger(part, 0, 65535);
@@ -562,7 +632,11 @@ export function parseOptionalTelemetryNumber(raw: string): string {
 
 export function csvDataRowCount(raw: string): number {
   const format = csvFormat(raw);
-  if (format === "live" || format === "retained") return parseSessionSamples(raw).length;
+  if (format === "live") return parseSessionSamples(raw).length;
+  if (format === "retained") {
+    const lines = knownCsvLines(raw);
+    return lines.length > 1 ? lines.length - 1 : 0;
+  }
   if (format === "fault") return parseFaultRows(raw).length;
   return 0;
 }
@@ -640,6 +714,71 @@ export function isHeaderOnlyFaultCsv(raw: string): boolean {
   return isHeaderOnlyCsvReadback(raw, FAULT_CSV_HEADER);
 }
 
+export function inspectSessionEvidence(raw: string): SessionEvidenceInspection | null {
+  if (!raw || raw.includes("\r")) return null;
+  const lines = csvEvidenceLines(raw);
+  const format = sessionCsvFormat(raw);
+  if (!lines || format === "unknown" || lines.length === 0) return null;
+
+  const rows = lines.slice(1);
+  const isValidRow = format === "live" ? isValidLiveSessionEvidenceRow : isValidRetainedCsvRow;
+  if (rows.some((row) => !isValidRow(row))) return null;
+
+  let previousInputMs = -Infinity;
+  let previousAirflowMs = -Infinity;
+  let airflowRunRows = 0;
+  let calibrationRows = 0;
+  let segmentCount = 0;
+  let selectedRows: string[] = [];
+  for (const row of rows) {
+    const parts = row.split(",");
+    const ms = finiteCsvNumber(parts[0]);
+    if (ms === null || ms <= previousInputMs) return null;
+    previousInputMs = ms;
+
+    if (format === "retained" && parts[18] === "calibration") {
+      calibrationRows += 1;
+      selectedRows = [];
+      previousAirflowMs = -Infinity;
+      continue;
+    }
+
+    airflowRunRows += 1;
+    if (
+      !Number.isFinite(previousAirflowMs)
+      || ms - previousAirflowMs > sessionMaxSampleGapMs(format)
+    ) {
+      segmentCount += 1;
+      selectedRows = [];
+    }
+    selectedRows.push(row);
+    previousAirflowMs = ms;
+  }
+
+  const suffix = raw.endsWith("\n") ? "\n" : "";
+  const selectedCsv = selectedRows.length > 0
+    ? `${[lines[0], ...selectedRows].join("\n")}${suffix}`
+    : "";
+  const samples = parseSessionSamples(raw);
+  if (samples.length !== selectedRows.length) return null;
+
+  return {
+    format,
+    inputRows: rows.length,
+    airflowRunRows,
+    calibrationRows,
+    segmentCount,
+    selectedRows: samples.length,
+    discardedAirflowRows: airflowRunRows - samples.length,
+    selectedCsv,
+    samples,
+  };
+}
+
+export function selectedSessionEvidenceCsv(raw: string): string {
+  return inspectSessionEvidence(raw)?.selectedCsv || "";
+}
+
 export function parseSessionGraphData(raw: string, maxPoints = 120): SessionGraphPoint[] {
   const points = parseSessionSamples(raw).map(({ ms, pressureCm, flowHpa, setpointCm, motorFgHz, spo2Percent, pulseBpm, oximeterSource, humidifierTempC, humidifierRhPercent, hoseTempC }) => {
     const point: SessionGraphPoint = { ms, pressureCm, flowHpa, setpointCm, motorFgHz };
@@ -686,15 +825,16 @@ export function summarizeSessionCsv(raw: string): SessionSummary {
 export function selectSessionAnalysisCsv(
   liveCsv: string,
   retainedCsv: string,
-  bleConnected: boolean,
+  liveAnalysisEligible: boolean,
 ): SessionAnalysisSelection {
-  if (bleConnected && parseSessionSamples(liveCsv).length >= LIVE_MIN_ANALYSIS_ROWS) {
-    return { csv: liveCsv, source: "Live 10 Hz app sync" };
+  if (liveAnalysisEligible && parseSessionSamples(liveCsv).length >= LIVE_MIN_ANALYSIS_ROWS) {
+    return { csv: liveCsv, kind: "live", source: "Live 10 Hz app sync" };
   }
-  if (parseSessionSamples(retainedCsv).length > 0) {
-    return { csv: retainedCsv, source: "Retained 1 Hz firmware session" };
+  const retainedAirflowCsv = airflowOnlySessionCsv(retainedCsv);
+  if (retainedAirflowCsv) {
+    return { csv: retainedAirflowCsv, kind: "retained", source: "Retained 1 Hz firmware session" };
   }
-  return { csv: "", source: "--" };
+  return { csv: "", kind: "none", source: "--" };
 }
 
 export function listSessionDayOptions(raw: string, maxDays = 7): SessionDayOption[] {
@@ -725,18 +865,104 @@ export function filterSessionCsvByDay(raw: string, dayKey: string): string {
 }
 
 export function flagSessionObservations(raw: string): SessionObservation[] {
+  return analyzeSessionCsv(raw).observations;
+}
+
+export function analyzeSessionCsv(raw: string): SessionAnalysisResult {
+  const detailed = analyzeSessionCsvDetails(raw);
+  return {
+    status: detailed.status,
+    rows: detailed.rows,
+    durationSec: detailed.durationSec,
+    observations: detailed.observations,
+    evidenceBasis: detailed.evidenceBasis,
+  };
+}
+
+export function analyzeSessionCsvDetails(raw: string): SessionAnalysisDetails {
+  const format = sessionCsvFormat(raw);
+  if (format === "unknown") {
+    return {
+      status: "unavailable",
+      rows: 0,
+      durationSec: 0,
+      observations: [],
+      evidenceBasis: "No valid airflow evidence source is available.",
+      reasonCode: "no_evidence_source",
+      baselineAbsFlowHpa: null,
+      nearZeroAbsFlowHpa: null,
+      reductionAbsFlowHpa: null,
+    };
+  }
   const samples = parseSessionSamples(raw);
-  if (samples.length < 20) return [];
+  if (samples.length === 0) {
+    return {
+      status: "unavailable",
+      rows: 0,
+      durationSec: 0,
+      observations: [],
+      evidenceBasis:
+        format === "retained"
+          ? "The retained evidence contains no airflow_run samples."
+          : "The live evidence contains no valid airflow samples.",
+      reasonCode: "no_airflow_samples",
+      baselineAbsFlowHpa: null,
+      nearZeroAbsFlowHpa: null,
+      reductionAbsFlowHpa: null,
+    };
+  }
+
+  const fallbackPeriodMs = format === "live" ? 100 : 1000;
+  const durationSec = sampleWindowDurationSec(samples, 1000, samples, fallbackPeriodMs);
+  if (samples.length < MIN_AIRFLOW_ANALYSIS_ROWS || durationSec < MIN_AIRFLOW_ANALYSIS_DURATION_SEC) {
+    return {
+      status: "insufficient",
+      rows: samples.length,
+      durationSec,
+      observations: [],
+      evidenceBasis: `At least ${MIN_AIRFLOW_ANALYSIS_DURATION_SEC}s and ${MIN_AIRFLOW_ANALYSIS_ROWS} airflow samples are required for interval analysis.`,
+      reasonCode: "minimum_window_not_met",
+      baselineAbsFlowHpa: null,
+      nearZeroAbsFlowHpa: null,
+      reductionAbsFlowHpa: null,
+    };
+  }
+  if (samples.length / durationSec < MIN_AIRFLOW_ANALYSIS_SAMPLE_RATE_HZ) {
+    return {
+      status: "insufficient",
+      rows: samples.length,
+      durationSec,
+      observations: [],
+      evidenceBasis: `The accepted airflow evidence is too sparse for interval analysis; its average rate must be at least ${MIN_AIRFLOW_ANALYSIS_SAMPLE_RATE_HZ} samples/s.`,
+      reasonCode: "average_rate_too_low",
+      baselineAbsFlowHpa: null,
+      nearZeroAbsFlowHpa: null,
+      reductionAbsFlowHpa: null,
+    };
+  }
 
   const absFlow = samples.map((sample) => Math.abs(sample.flowHpa)).filter((value) => Number.isFinite(value));
   const baselineFlow = percentile(absFlow, 75);
-  if (!Number.isFinite(baselineFlow) || baselineFlow < 0.05) return [];
+  if (!Number.isFinite(baselineFlow) || baselineFlow < 0.05) {
+    return {
+      status: "insufficient",
+      rows: samples.length,
+      durationSec,
+      observations: [],
+      evidenceBasis: "The flow proxy does not provide a usable baseline for interval analysis.",
+      reasonCode: "flow_baseline_unusable",
+      baselineAbsFlowHpa: Number.isFinite(baselineFlow) ? baselineFlow : null,
+      nearZeroAbsFlowHpa: null,
+      reductionAbsFlowHpa: null,
+    };
+  }
 
-  const apneaThreshold = Math.max(0.03, baselineFlow * 0.2);
-  const hypopneaThreshold = Math.max(apneaThreshold, baselineFlow * 0.5);
+  const nearZeroThreshold = Math.max(0.03, baselineFlow * 0.2);
+  const reductionThreshold = Math.max(nearZeroThreshold, baselineFlow * 0.5);
   const observations: SessionObservation[] = [];
+  let sparseCandidateDetected = false;
   let segmentStart = -1;
-  let segmentKind: "apnea" | "hypopnea" | null = null;
+  let segmentKind: "near_zero" | "partial_reduction" | null = null;
 
   const closeSegment = (endIndex: number) => {
     if (segmentStart < 0 || !segmentKind) return;
@@ -744,12 +970,17 @@ export function flagSessionObservations(raw: string): SessionObservation[] {
     if (segment.length === 0) return;
     const durationSec = segmentDurationSec(segment, samples);
     if (durationSec < 10) return;
+    if (segment.length / durationSec < MIN_AIRFLOW_ANALYSIS_SAMPLE_RATE_HZ) {
+      sparseCandidateDetected = true;
+      return;
+    }
     observations.push(classifyObservation(samples, segmentStart, endIndex, segmentKind, baselineFlow));
   };
 
   samples.forEach((sample, index) => {
     const value = Math.abs(sample.flowHpa);
-    const nextKind = value <= apneaThreshold ? "apnea" : value <= hypopneaThreshold ? "hypopnea" : null;
+    const nextKind =
+      value <= nearZeroThreshold ? "near_zero" : value <= reductionThreshold ? "partial_reduction" : null;
     if (nextKind === segmentKind) return;
     closeSegment(index);
     segmentStart = nextKind ? index : -1;
@@ -757,7 +988,31 @@ export function flagSessionObservations(raw: string): SessionObservation[] {
   });
   closeSegment(samples.length);
 
-  return observations.slice(0, 50);
+  if (sparseCandidateDetected) {
+    return {
+      status: "insufficient",
+      rows: samples.length,
+      durationSec,
+      observations: [],
+      evidenceBasis: "A reduced-flow candidate was too sparsely sampled for a reliable interval result.",
+      reasonCode: "candidate_rate_too_low",
+      baselineAbsFlowHpa: baselineFlow,
+      nearZeroAbsFlowHpa: nearZeroThreshold,
+      reductionAbsFlowHpa: reductionThreshold,
+    };
+  }
+
+  return {
+    status: "analyzed",
+    rows: samples.length,
+    durationSec,
+    observations: observations.slice(0, 50),
+    evidenceBasis: `Flow-proxy intervals were evaluated against the session's 75th-percentile absolute-flow baseline (${formatNumber(baselineFlow)} hPa).`,
+    reasonCode: "complete",
+    baselineAbsFlowHpa: baselineFlow,
+    nearZeroAbsFlowHpa: nearZeroThreshold,
+    reductionAbsFlowHpa: reductionThreshold,
+  };
 }
 
 export function sanitizeSettings(settings: Partial<OzealisSettings>): OzealisSettings {
@@ -1120,30 +1375,15 @@ function parseMcfPins(value: unknown): McfParamsSnapshot["pins"] {
   };
 }
 
-function parseSessionSamples(raw: string) {
+function parseSessionSamples(raw: string): SessionEvidenceSample[] {
   const lines = csvEvidenceLines(raw);
   if (!lines) return [];
   const format = sessionCsvFormat(raw);
   if (format === "unknown") return [];
+  if (format === "retained" && lines.slice(1).some((row) => !isValidRetainedCsvRow(row))) return [];
   const maxGapMs = sessionMaxSampleGapMs(format);
   let lastMs = -Infinity;
-  let samples: {
-    ms: number;
-    setpointCm: number;
-    pressureCm: number;
-    errorCm: number;
-    flowHpa: number;
-    motorAmp: number;
-    controllerErrorCm: number;
-    controllerAmp: number;
-    motorFgHz: number;
-    spo2Percent?: number | null;
-    pulseBpm?: number | null;
-    oximeterSource?: number;
-    humidifierTempC?: number | null;
-    humidifierRhPercent?: number | null;
-    hoseTempC?: number | null;
-  }[] = [];
+  let samples: SessionEvidenceSample[] = [];
   lines.slice(1).forEach((row) => {
       const parts = row.split(",");
       if (format === "live") {
@@ -1158,7 +1398,8 @@ function parseSessionSamples(raw: string) {
           pressureCm: values[6] as number,
           errorCm: values[7] as number,
           flowHpa: values[3] as number,
-          motorAmp: values[8] as number,
+          motorAmplitude: null,
+          motorCommand: values[9] as number,
           controllerErrorCm: values[7] as number,
           controllerAmp: values[8] as number,
           motorFgHz: values[12] as number,
@@ -1169,7 +1410,7 @@ function parseSessionSamples(raw: string) {
           humidifierRhPercent: environment.humidifierRhPercent,
           hoseTempC: environment.hoseTempC,
         };
-        if (![sample.ms, sample.setpointCm, sample.pressureCm, sample.flowHpa, sample.motorFgHz].every(Number.isFinite)) return;
+        if (![sample.ms, sample.setpointCm, sample.pressureCm, sample.flowHpa, sample.motorCommand, sample.motorFgHz].every(Number.isFinite)) return;
         if (sample.ms === lastMs) return;
         if (sample.ms < lastMs || (Number.isFinite(lastMs) && sample.ms - lastMs > maxGapMs)) samples = [];
         lastMs = sample.ms;
@@ -1179,6 +1420,11 @@ function parseSessionSamples(raw: string) {
       if (!isValidRetainedCsvRow(row)) return;
       const values = parts.slice(0, 12).map((part) => finiteCsvNumber(part));
       if (values.some((value) => value === null)) return;
+      if (parts[18] === "calibration") {
+        samples = [];
+        lastMs = -Infinity;
+        return;
+      }
       const oximetry = parseOximetryCsvFields(parts, 12);
       const environment = parseEnvironmentCsvFields(parts, 15);
       const sample = {
@@ -1187,7 +1433,8 @@ function parseSessionSamples(raw: string) {
         pressureCm: values[2] as number,
         errorCm: values[3] as number,
         flowHpa: values[4] as number,
-        motorAmp: values[5] as number,
+        motorAmplitude: values[5] as number,
+        motorCommand: values[8] as number,
         controllerErrorCm: values[6] as number,
         controllerAmp: values[7] as number,
         motorFgHz: values[11] as number,
@@ -1198,7 +1445,7 @@ function parseSessionSamples(raw: string) {
         humidifierRhPercent: environment.humidifierRhPercent,
         hoseTempC: environment.hoseTempC,
       };
-      if (![sample.ms, sample.setpointCm, sample.pressureCm, sample.flowHpa, sample.motorFgHz].every(Number.isFinite)) return;
+      if (![sample.ms, sample.setpointCm, sample.pressureCm, sample.flowHpa, sample.motorCommand, sample.motorFgHz].every(Number.isFinite)) return;
       if (sample.ms === lastMs) return;
       if (sample.ms < lastMs || (Number.isFinite(lastMs) && sample.ms - lastMs > maxGapMs)) samples = [];
       lastMs = sample.ms;
@@ -1246,6 +1493,7 @@ function knownCsvLines(raw: string): string[] {
   if (format === "fault") {
     return lines.slice(0, 1).concat(parseFaultRows(raw));
   }
+  if (format === "retained" && lines.slice(1).some((row) => !isValidRetainedCsvRow(row))) return [];
   let lastMs = -Infinity;
   const maxGapMs = format === "live" ? LIVE_MAX_SAMPLE_GAP_MS : RETAINED_MAX_SAMPLE_GAP_MS;
   let rows: string[] = [];
@@ -1270,12 +1518,18 @@ function validSessionRows(raw: string): { ms: number; row: string }[] {
   if (!lines) return [];
   const format = sessionCsvFormat(raw);
   if (format === "unknown") return [];
+  if (format === "retained" && lines.slice(1).some((row) => !isValidRetainedCsvRow(row))) return [];
   const maxGapMs = sessionMaxSampleGapMs(format);
   let lastMs = -Infinity;
   let rows: { ms: number; row: string }[] = [];
   lines.slice(1).forEach((row) => {
     if (format === "live" && !isValidLiveSessionEvidenceRow(row)) return;
     if (format === "retained" && !isValidRetainedCsvRow(row)) return;
+    if (format === "retained" && row.split(",")[18] === "calibration") {
+      rows = [];
+      lastMs = -Infinity;
+      return;
+    }
     const ms = finiteCsvNumber(row.split(",")[0]);
     if (ms === null) return;
     if (ms === lastMs) return;
@@ -1284,6 +1538,14 @@ function validSessionRows(raw: string): { ms: number; row: string }[] {
     rows.push({ ms, row });
   });
   return rows;
+}
+
+function airflowOnlySessionCsv(raw: string): string {
+  const rows = validSessionRows(raw);
+  if (rows.length === 0) return "";
+  const header = csvHeader(raw);
+  const suffix = raw.endsWith("\n") ? "\n" : "";
+  return `${[header, ...rows.map(({ row }) => row)].join("\n")}${suffix}`;
 }
 
 function elapsedDayIndex(ms: number, lastMs: number): number {
@@ -1324,10 +1586,14 @@ function csvEvidenceLines(raw: string): string[] | null {
 function isValidRetainedCsvRow(row: string): boolean {
   if (row !== row.trim()) return false;
   const parts = row.split(",");
-  if (parts.length !== 18) return false;
+  if (parts.length !== 19) return false;
   if (!validOximetryCsvTriplet(parts, 12) || !validEnvironmentCsvTriplet(parts, 15)) return false;
   return parts.every((part, index) => {
     if (index === 0) return boundedCsvInteger(part, 0, Number.MAX_SAFE_INTEGER);
+    if (index === 1) return boundedCsvNumber(part, 0, 25);
+    if (index === 2) return boundedCsvNumber(part, -25, 25);
+    if (index === 3 || index === 6) return boundedCsvNumber(part, -50, 50);
+    if (index === 4) return boundedCsvNumber(part, -1_000, 1_000);
     if (index === 5 || index === 7) return boundedCsvInteger(part, 0, 255);
     if (index === 8) return boundedCsvInteger(part, 0, 65535);
     if (index === 9 || index === 10) return boundedCsvInteger(part, 0, 1);
@@ -1338,6 +1604,7 @@ function isValidRetainedCsvRow(row: string): boolean {
     if (index === 15) return part === "NAN" || boundedCsvNumber(part, -20, 80);
     if (index === 16) return part === "NAN" || boundedCsvNumber(part, 0, 100);
     if (index === 17) return part === "NAN" || boundedCsvNumber(part, -20, 80);
+    if (index === 18) return part === "airflow_run" || part === "calibration";
     return finiteCsvNumber(part) !== null;
   });
 }
@@ -1407,7 +1674,7 @@ function classifyObservation(
   samples: ReturnType<typeof parseSessionSamples>,
   startIndex: number,
   endIndex: number,
-  segmentKind: "apnea" | "hypopnea",
+  segmentKind: "near_zero" | "partial_reduction",
   baselineFlow: number,
 ): SessionObservation {
   const segment = samples.slice(startIndex, endIndex);
@@ -1422,15 +1689,14 @@ function classifyObservation(
   const controllerRise = hasControllerBaseline ? meanController - beforeController : 0;
   const flowDropPercent = Math.max(0, Math.min(100, Math.round((1 - meanFlow / baselineFlow) * 100)));
 
-  if (segmentKind === "hypopnea") {
+  if (segmentKind === "partial_reduction") {
     return {
       startMs: segment[0].ms,
       endMs: segment[segment.length - 1].ms,
       durationSec: Math.round(durationSec),
-      type: "possible hypopnea-like low-flow pattern",
-      confidence: "low",
+      type: "partial low-flow reduction",
       flowDropPercent,
-      basis: `flow proxy reduced about ${flowDropPercent}% for ${Math.round(durationSec)}s`,
+      evidenceBasis: `flow proxy reduced about ${flowDropPercent}% for ${Math.round(durationSec)}s`,
     };
   }
 
@@ -1439,10 +1705,9 @@ function classifyObservation(
       startMs: segment[0].ms,
       endMs: segment[segment.length - 1].ms,
       durationSec: Math.round(durationSec),
-      type: "possible obstructive low-flow pattern",
-      confidence: "medium",
+      type: "low-flow with pressure/controller response",
       flowDropPercent,
-      basis: `near-zero flow with pressure error ${formatNumber(meanError)} cmH2O and controller change ${formatNumber(controllerRise)}`,
+      evidenceBasis: `near-zero flow with pressure-tracking deviation ${formatNumber(meanError)} cmH2O and controller-response change ${formatNumber(controllerRise)}`,
     };
   }
 
@@ -1451,10 +1716,9 @@ function classifyObservation(
       startMs: segment[0].ms,
       endMs: segment[segment.length - 1].ms,
       durationSec: Math.round(durationSec),
-      type: "possible central-like low-flow pattern",
-      confidence: "low",
+      type: "low-flow without strong controller response",
       flowDropPercent,
-      basis: `near-zero flow without a strong pressure-error or controller-rise signal`,
+      evidenceBasis: "near-zero flow with stable pressure tracking and controller response",
     };
   }
 
@@ -1462,10 +1726,9 @@ function classifyObservation(
     startMs: segment[0].ms,
     endMs: segment[segment.length - 1].ms,
     durationSec: Math.round(durationSec),
-    type: "indeterminate low-flow pattern",
-    confidence: "low",
+    type: "indeterminate low-flow window",
     flowDropPercent,
-    basis: `near-zero flow for ${Math.round(durationSec)}s`,
+    evidenceBasis: `near-zero flow for ${Math.round(durationSec)}s with limited control-response evidence`,
   };
 }
 
@@ -1484,7 +1747,7 @@ function mean(values: number[]): number {
 
 function segmentDurationSec<T extends { ms: number }>(segment: T[], allSamples: T[]): number {
   if (segment.length === 0) return 0;
-  return sampleWindowDurationSec(segment, Infinity, allSamples);
+  return sampleWindowDurationSec(segment, MAX_ANALYSIS_SAMPLE_PERIOD_MS, allSamples);
 }
 
 function sampleWindowDurationSec<T extends { ms: number }>(

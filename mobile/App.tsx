@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Buffer } from "buffer";
-import { File, Paths } from "expo-file-system";
+import * as Crypto from "expo-crypto";
+import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { StatusBar } from "expo-status-bar";
 import { Component, ErrorInfo, ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -23,6 +24,37 @@ import { BleManager, Device, State, Subscription } from "react-native-ble-plx";
 
 import { advanceSessionGeneration, OperationLeaseCoordinator } from "./src/operationLease";
 import type { OperationLeaseToken } from "./src/operationLease";
+import { downsampleSessionGraphPoints } from "./src/graphDownsampling";
+import {
+  LIVE_EVIDENCE_MIN_FRESH_ROWS,
+  buildLiveEvidenceManifest,
+  decideLiveEvidenceSample,
+  isSameLiveEvidenceOwner,
+  restoreLiveEvidenceSnapshot,
+  serializeLiveEvidenceManifest,
+} from "./src/liveEvidence";
+import type { LiveEvidenceManifest, LiveEvidenceOwner, LiveEvidenceSnapshot } from "./src/liveEvidence";
+import {
+  serializeSessionReportV1,
+  sessionReportSelectedAirflowCsv,
+} from "./src/sessionReport";
+import type { SessionReportInput } from "./src/sessionReport";
+import {
+  SESSION_ARCHIVE_MAX_ENTRY_BYTES,
+  SESSION_ARCHIVE_MAX_ENTRIES,
+  SESSION_ARCHIVE_MAX_TOTAL_BYTES,
+  compareSessionArchiveRecords,
+  createSessionArchiveEntryV1,
+  serializeSessionArchiveEntryV1,
+  sortSessionArchiveRecords,
+  verifySessionArchiveEntryV1,
+} from "./src/sessionArchive";
+import type {
+  SessionComparisonMetric,
+  SessionComparisonReasonCode,
+  SessionComparisonV1,
+  VerifiedSessionArchiveRecordV1,
+} from "./src/sessionArchive";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_PREWARM_SCHEDULE,
@@ -43,8 +75,8 @@ import {
   csvTransferHash,
   csvDataRowCount,
   csvPreview,
+  analyzeSessionCsv,
   filterSessionCsvByDay,
-  flagSessionObservations,
   formatOximetryStatus,
   isClearedDeviceLogReadback,
   isCompatibleDeviceSession,
@@ -80,6 +112,7 @@ import {
   sanitizeSettings,
   sanitizePrewarmSchedule,
   selectSessionAnalysisCsv,
+  SessionAnalysisStatus,
   SessionGraphPoint,
   SessionObservation,
   PrewarmSchedule,
@@ -138,6 +171,22 @@ type RetainedImportState = {
   faultCsv: string;
   manifest: RetainedImportManifest;
 };
+type SessionReportDraft = {
+  ownerDeviceId: string;
+  input: SessionReportInput;
+};
+type SessionReportArtifact = SessionReportDraft & {
+  reportJson: string;
+};
+type StoredSessionArchiveRecord = {
+  fileName: string;
+  byteCount: number;
+  record: VerifiedSessionArchiveRecordV1;
+};
+type PendingSessionArchiveFile = {
+  fileName: string;
+  byteCount: number;
+};
 type RetainedLoadResult = "imported" | "empty" | "failed" | "stale" | "unavailable";
 
 const therapyModes = THERAPY_MODE_LABELS;
@@ -189,11 +238,18 @@ const maxLiveSyncRows = liveSyncRetentionMinutes * 60 * 10;
 const liveSyncRestartBackstepMs = 5000;
 const liveSyncMaxSampleGapMs = 1000;
 const liveSyncSpoolFileName = "ozealis-live-sync.csv";
+const liveSyncManifestFileName = "ozealis-live-sync-manifest.json";
 const retainedSessionImportFileName = "ozealis-retained-session.csv";
 const retainedFaultImportFileName = "ozealis-retained-faults.csv";
 const retainedImportManifestFileName = "ozealis-retained-import.json";
 const uiPreferenceFileName = "ozealis-ui-preferences.json";
 const prewarmScheduleFileName = "ozealis-prewarm-schedule.json";
+const sessionArchiveDirectoryName = "ozealis-session-archive-v1";
+const sessionArchiveFileNamePattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
+const sessionArchivePendingFileNamePattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.pending$/;
+const sessionArchiveMaxRestoreFiles = SESSION_ARCHIVE_MAX_ENTRIES * 2;
 const autoImportRetryDelayMs = 2000;
 const autoImportMaxAttempts = 3;
 const blePreviewMode = Platform.OS === "web";
@@ -210,6 +266,15 @@ const advancedGraphScales: { key: GraphScale; label: string }[] = [
   { key: "1m", label: "1 min" },
   { key: "30s", label: "30 sec" },
 ];
+
+async function digestSha256Text(value: string): Promise<string> {
+  const digest = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    value,
+    { encoding: Crypto.CryptoEncoding.HEX },
+  );
+  return digest.toLowerCase();
+}
 const simpleGraphScales: { key: GraphScale; label: string }[] = [
   { key: "all", label: "Night" },
   { key: "30s", label: "Breath" },
@@ -295,9 +360,22 @@ function OzealisApp() {
   const liveSyncPendingRowsRef = useRef<string[]>([]);
   const liveSyncLastMsRef = useRef(0);
   const liveSyncLastUiMsRef = useRef(0);
+  const liveSyncOwnerRef = useRef<LiveEvidenceOwner | null>(null);
+  const liveSyncManifestRef = useRef<LiveEvidenceManifest | null>(null);
+  const liveReportSnapshotRef = useRef<LiveEvidenceSnapshot | null>(null);
+  const liveSyncCreatedAtMsRef = useRef(0);
+  const liveSyncProtocolRef = useRef("");
+  const liveSyncFreshRowsRef = useRef(0);
+  const liveSyncRestoredRef = useRef(false);
+  const liveSyncLifecycleRef = useRef(0);
   const liveSyncSpoolReadyRef = useRef(false);
   const uiPreferenceReadyRef = useRef(false);
   const prewarmScheduleReadyRef = useRef(false);
+  const sessionArchiveReadyRef = useRef(false);
+  const sessionArchiveRecordsRef = useRef<StoredSessionArchiveRecord[]>([]);
+  const sessionArchivePendingFilesRef = useRef<PendingSessionArchiveFile[]>([]);
+  const sessionArchiveStoredBytesRef = useRef(0);
+  const sessionArchiveMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const advancedModeRef = useRef(false);
   const writeGuardsRef = useRef({
     busy: false,
@@ -332,8 +410,17 @@ function OzealisApp() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [retainedImport, setRetainedImport] = useState<RetainedImportState | null>(null);
+  const [sessionArchiveRecords, setSessionArchiveRecords] = useState<StoredSessionArchiveRecord[]>([]);
+  const [sessionArchiveIssueCount, setSessionArchiveIssueCount] = useState(0);
+  const [sessionArchivePendingCount, setSessionArchivePendingCount] = useState(0);
+  const [sessionArchiveStorageError, setSessionArchiveStorageError] = useState(false);
+  const [comparisonCurrentArchiveId, setComparisonCurrentArchiveId] = useState("");
+  const [comparisonBaselineArchiveId, setComparisonBaselineArchiveId] = useState("");
+  const [showAllArchivedSessions, setShowAllArchivedSessions] = useState(false);
   const [liveSyncCsv, setLiveSyncCsv] = useState("");
   const [liveSyncRowCount, setLiveSyncRowCount] = useState(0);
+  const [liveSyncFreshRowCount, setLiveSyncFreshRowCount] = useState(0);
+  const [liveSyncManifest, setLiveSyncManifest] = useState<LiveEvidenceManifest | null>(null);
   const [liveSyncSessionActive, setLiveSyncSessionActive] = useState(false);
   const [driverParamsJson, setDriverParamsJson] = useState("");
   const [protocolVersion, setProtocolVersion] = useState("unknown");
@@ -535,11 +622,33 @@ function OzealisApp() {
   const faultRows = useMemo(() => csvDataRowCount(visibleFaultCsv), [visibleFaultCsv]);
   const sessionPreview = useMemo(() => csvPreview(visibleLogCsv), [visibleLogCsv]);
   const faultPreview = useMemo(() => csvPreview(visibleFaultCsv), [visibleFaultCsv]);
+  const liveSyncManifestMatchesCurrentBuild = Boolean(
+    liveSyncManifest
+    && liveSyncManifest.appVersion === appVersion
+    && liveSyncManifest.protocol === OZEALIS_PROTOCOL_VERSION,
+  );
+  const liveSyncEvidenceMatchesConnection = Boolean(
+    connectedDevice
+    && liveSyncFreshRowCount > 0
+    && liveSyncManifest
+    && liveSyncManifestMatchesCurrentBuild
+    && liveSyncManifest.deviceId === connectedDevice.id
+    && liveSyncManifest.appSessionId === deviceSessionIdRef.current,
+  );
+  const liveSyncModeEligible = telemetry.mode === "1" || telemetry.mode === "2";
+  const liveSyncAnalysisEligible =
+    canUseDevice
+    && protocolCompatible
+    && liveSyncEvidenceMatchesConnection
+    && liveSyncFreshRowCount >= LIVE_EVIDENCE_MIN_FRESH_ROWS
+    && liveSyncSessionActive
+    && liveSyncModeEligible;
   const analysisSelection = useMemo(
-    () => selectSessionAnalysisCsv(liveSyncCsv, visibleLogCsv, canUseDevice && liveSyncSessionActive),
-    [liveSyncCsv, visibleLogCsv, canUseDevice, liveSyncSessionActive],
+    () => selectSessionAnalysisCsv(liveSyncCsv, visibleLogCsv, liveSyncAnalysisEligible),
+    [liveSyncCsv, visibleLogCsv, liveSyncAnalysisEligible],
   );
   const analysisCsv = analysisSelection.csv;
+  const analysisKind = analysisSelection.kind;
   const analysisSource = analysisSelection.source;
   const liveSyncRows = liveSyncRowCount;
   const sessionSummary = useMemo(() => summarizeSessionCsv(visibleLogCsv), [visibleLogCsv]);
@@ -562,7 +671,57 @@ function OzealisApp() {
     () => formatGraphWindowLabel(sessionGraphPoints, graphSourcePoints, activeGraphScale, advancedMode),
     [sessionGraphPoints, graphSourcePoints, activeGraphScale, advancedMode],
   );
-  const sessionObservations = useMemo(() => flagSessionObservations(visibleAnalysisCsv), [visibleAnalysisCsv]);
+  const sessionAnalysis = useMemo(() => analyzeSessionCsv(visibleAnalysisCsv), [visibleAnalysisCsv]);
+  const sessionObservations = sessionAnalysis.observations;
+  const defaultComparisonCurrent = sessionArchiveRecords.find(
+    (current) =>
+      sessionArchiveRecords.some(
+        (candidate) =>
+          candidate.record.entry.archiveId !== current.record.entry.archiveId
+          && candidate.record.entry.owner.fingerprint
+            === current.record.entry.owner.fingerprint,
+      ),
+  ) || null;
+  const requestedComparisonCurrent = sessionArchiveRecords.find(
+    (stored) =>
+      stored.record.entry.archiveId === comparisonCurrentArchiveId
+      && sessionArchiveRecords.some(
+        (candidate) =>
+          candidate.record.entry.archiveId !== stored.record.entry.archiveId
+          && candidate.record.entry.owner.fingerprint
+            === stored.record.entry.owner.fingerprint,
+      ),
+  ) || null;
+  const selectedComparisonCurrent =
+    requestedComparisonCurrent || defaultComparisonCurrent;
+  const defaultComparisonBaseline = selectedComparisonCurrent
+    ? sessionArchiveRecords.find(
+        (stored) =>
+          stored.record.entry.archiveId !== selectedComparisonCurrent.record.entry.archiveId
+          && stored.record.entry.owner.fingerprint
+            === selectedComparisonCurrent.record.entry.owner.fingerprint,
+      ) || null
+    : null;
+  const selectedComparisonBaseline = selectedComparisonCurrent
+    ? sessionArchiveRecords.find(
+        (stored) =>
+          stored.record.entry.archiveId === comparisonBaselineArchiveId
+          && stored.record.entry.archiveId
+            !== selectedComparisonCurrent.record.entry.archiveId
+          && stored.record.entry.owner.fingerprint
+            === selectedComparisonCurrent.record.entry.owner.fingerprint,
+      ) || defaultComparisonBaseline
+    : null;
+  const sessionArchiveComparison: SessionComparisonV1 | null =
+    selectedComparisonCurrent && selectedComparisonBaseline
+      ? compareSessionArchiveRecords(
+          selectedComparisonBaseline.record,
+          selectedComparisonCurrent.record,
+        )
+      : null;
+  const visibleArchivedSessions = showAllArchivedSessions
+    ? sessionArchiveRecords
+    : sessionArchiveRecords.slice(0, 5);
   const simpleDataWindow = selectedDataCsv.trim() ? formatDuration(selectedDataSummary.durationSec) : "--";
   const waterTargetLabel = calibration.mode === "water" && calibration.targetCm ? `${calibration.targetCm} cmH2O` : "4 cmH2O";
   const waterSetupReady = waterSetupItems.every((item) => waterSetupChecks[item.key]);
@@ -603,6 +762,7 @@ function OzealisApp() {
     restorePrewarmSchedule();
     restoreRetainedImports();
     restoreLiveSyncSpool();
+    void enqueueSessionArchiveMutation(restoreSessionArchive);
     if (blePreviewMode) {
       setBleState("Unsupported" as State);
       setMessage("Previewing the app layout.");
@@ -945,6 +1105,9 @@ function OzealisApp() {
     protocolVersionRef.current = "unknown";
     setSettingsReadbackValid(false);
     cleanupSubscriptions();
+    liveSyncFreshRowsRef.current = 0;
+    setLiveSyncFreshRowCount(0);
+    setLiveSyncSessionActive(false);
     setMessage("Connecting...");
     let discovered: Device | null = null;
     let connectedForCleanup: Device | null = null;
@@ -1299,6 +1462,8 @@ function OzealisApp() {
     setOtaSsid("");
     setOtaPassword("");
     setOtaUrl("");
+    liveSyncFreshRowsRef.current = 0;
+    setLiveSyncFreshRowCount(0);
     setLiveSyncSessionActive(false);
     setWaterSetupChecks({ ...emptyWaterSetupChecks });
     previousModeRef.current = EMPTY_TELEMETRY.mode;
@@ -1765,7 +1930,7 @@ function OzealisApp() {
   function updateTelemetryValue(device: Device, sessionId: number, key: keyof OzealisTelemetry, value: string) {
     if (!isCurrentDeviceSession(device, sessionId)) return;
     if (key === "liveCsv" && value) {
-      captureLiveCsv(value);
+      captureLiveCsv(device, sessionId, value);
     }
     setTelemetry((current) => {
       if (!isCurrentDeviceSession(device, sessionId)) return current;
@@ -1799,13 +1964,23 @@ function OzealisApp() {
   }
 
   function resetLiveSync() {
+    liveSyncLifecycleRef.current += 1;
     liveSyncRowsRef.current = [];
     liveSyncPendingRowsRef.current = [];
     liveSyncLastMsRef.current = 0;
     liveSyncLastUiMsRef.current = 0;
+    liveSyncOwnerRef.current = null;
+    liveSyncManifestRef.current = null;
+    liveReportSnapshotRef.current = null;
+    liveSyncCreatedAtMsRef.current = 0;
+    liveSyncProtocolRef.current = "";
+    liveSyncFreshRowsRef.current = 0;
+    liveSyncRestoredRef.current = false;
     setLiveSyncSessionActive(false);
     setLiveSyncCsv("");
     setLiveSyncRowCount(0);
+    setLiveSyncFreshRowCount(0);
+    setLiveSyncManifest(null);
     writeLiveSyncSpool([]);
   }
 
@@ -1813,6 +1988,7 @@ function OzealisApp() {
     const rows = liveSyncRowsRef.current;
     setLiveSyncCsv(formatLiveSyncCsv(rows));
     setLiveSyncRowCount(rows.length);
+    updateLiveSyncManifest(rows);
     flushLiveSyncSpool();
   }
 
@@ -1890,6 +2066,210 @@ function OzealisApp() {
     }
   }
 
+  function enqueueSessionArchiveMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = sessionArchiveMutationQueueRef.current
+      .catch(() => undefined)
+      .then(operation);
+    sessionArchiveMutationQueueRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  function publishSessionArchiveRecords(records: StoredSessionArchiveRecord[]): number {
+    const storedByArchiveId = new Map<string, StoredSessionArchiveRecord>();
+    for (const stored of records) {
+      const existing = storedByArchiveId.get(stored.record.entry.archiveId);
+      if (
+        !existing
+        || stored.record.entry.archivedAtMs < existing.record.entry.archivedAtMs
+        || (
+          stored.record.entry.archivedAtMs === existing.record.entry.archivedAtMs
+          && stored.fileName.localeCompare(existing.fileName) < 0
+        )
+      ) {
+        storedByArchiveId.set(stored.record.entry.archiveId, stored);
+      }
+    }
+    const sortedRecords = sortSessionArchiveRecords(
+      [...storedByArchiveId.values()].map((stored) => stored.record),
+    );
+    const overflowCount = Math.max(0, sortedRecords.length - SESSION_ARCHIVE_MAX_ENTRIES);
+    const allRecords = sortedRecords.map(
+      (record) => storedByArchiveId.get(record.entry.archiveId) as StoredSessionArchiveRecord,
+    );
+    sessionArchiveRecordsRef.current = allRecords;
+    setSessionArchiveRecords(allRecords.slice(0, SESSION_ARCHIVE_MAX_ENTRIES));
+    return overflowCount;
+  }
+
+  async function restoreSessionArchive(): Promise<boolean> {
+    if (sessionArchiveReadyRef.current) return true;
+    if (Platform.OS === "web") {
+      publishSessionArchiveRecords([]);
+      setSessionArchiveIssueCount(0);
+      sessionArchivePendingFilesRef.current = [];
+      sessionArchiveStoredBytesRef.current = 0;
+      setSessionArchivePendingCount(0);
+      setSessionArchiveStorageError(false);
+      sessionArchiveReadyRef.current = true;
+      return true;
+    }
+    let issueCount = 0;
+    const restored: StoredSessionArchiveRecord[] = [];
+    try {
+      const directory = new Directory(Paths.document, sessionArchiveDirectoryName);
+      if (!directory.exists) {
+        publishSessionArchiveRecords([]);
+        setSessionArchiveIssueCount(0);
+        sessionArchivePendingFilesRef.current = [];
+        sessionArchiveStoredBytesRef.current = 0;
+        setSessionArchivePendingCount(0);
+        setSessionArchiveStorageError(false);
+        sessionArchiveReadyRef.current = true;
+        return true;
+      }
+      const listedFiles = directory
+        .list()
+        .filter((candidate): candidate is File => candidate instanceof File);
+      const committedFiles = listedFiles
+        .filter((file) => sessionArchiveFileNamePattern.test(file.name))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const pendingFiles = listedFiles
+        .filter((file) => sessionArchivePendingFileNamePattern.test(file.name))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      sessionArchivePendingFilesRef.current = pendingFiles.map((file) => ({
+        fileName: file.name,
+        byteCount: Number.isSafeInteger(file.size) ? Math.max(0, file.size) : 0,
+      }));
+      setSessionArchivePendingCount(pendingFiles.length);
+      if (committedFiles.length + pendingFiles.length > sessionArchiveMaxRestoreFiles) {
+        throw new Error("The archive contains too many files to verify safely.");
+      }
+
+      let observedBytes = 0;
+      for (const file of [...committedFiles, ...pendingFiles]) {
+        if (Number.isSafeInteger(file.size) && file.size > 0) {
+          observedBytes = Math.min(Number.MAX_SAFE_INTEGER, observedBytes + file.size);
+        }
+      }
+      if (observedBytes > SESSION_ARCHIVE_MAX_TOTAL_BYTES) {
+        throw new Error("The archive exceeds the bounded restore size.");
+      }
+      sessionArchiveStoredBytesRef.current = observedBytes;
+
+      for (const file of committedFiles) {
+        const byteCount = file.size;
+        if (
+          !Number.isSafeInteger(byteCount)
+          || byteCount <= 0
+          || byteCount > SESSION_ARCHIVE_MAX_ENTRY_BYTES
+        ) {
+          issueCount += 1;
+          continue;
+        }
+        try {
+          const record = await verifySessionArchiveEntryV1(
+            await file.text(),
+            digestSha256Text,
+          );
+          if (record) {
+            restored.push({ fileName: file.name, byteCount, record });
+          } else {
+            issueCount += 1;
+          }
+        } catch {
+          issueCount += 1;
+        }
+      }
+
+      const unresolvedPending: PendingSessionArchiveFile[] = [];
+      const committedNames = new Set(committedFiles.map((file) => file.name));
+      const committedArchiveIds = new Set(
+        restored.map(({ record }) => record.entry.archiveId),
+      );
+      for (const pendingFile of pendingFiles) {
+        const pendingName = pendingFile.name;
+        const pendingByteCount = pendingFile.size;
+        if (
+          !Number.isSafeInteger(pendingByteCount)
+          || pendingByteCount <= 0
+          || pendingByteCount > SESSION_ARCHIVE_MAX_ENTRY_BYTES
+        ) {
+          issueCount += 1;
+          unresolvedPending.push({
+            fileName: pendingName,
+            byteCount: Math.max(0, Number.isFinite(pendingByteCount) ? pendingByteCount : 0),
+          });
+          continue;
+        }
+        const finalName = pendingName.replace(/\.pending$/, ".json");
+        const finalFile = new File(directory, finalName);
+        if (committedNames.has(finalName) || finalFile.exists) {
+          issueCount += 1;
+          unresolvedPending.push({ fileName: pendingName, byteCount: pendingByteCount });
+          continue;
+        }
+        try {
+          const stagedRecord = await verifySessionArchiveEntryV1(
+            await pendingFile.text(),
+            digestSha256Text,
+          );
+          if (!stagedRecord) {
+            issueCount += 1;
+            unresolvedPending.push({ fileName: pendingName, byteCount: pendingByteCount });
+            continue;
+          }
+          if (committedArchiveIds.has(stagedRecord.entry.archiveId)) {
+            issueCount += 1;
+            unresolvedPending.push({ fileName: pendingName, byteCount: pendingByteCount });
+            continue;
+          }
+          await pendingFile.move(finalFile);
+          const recoveredRecord = await verifySessionArchiveEntryV1(
+            await finalFile.text(),
+            digestSha256Text,
+          );
+          if (!recoveredRecord || recoveredRecord.entry.archiveId !== stagedRecord.entry.archiveId) {
+            throw new Error("Recovered archive entry failed final validation.");
+          }
+          committedNames.add(finalName);
+          committedArchiveIds.add(recoveredRecord.entry.archiveId);
+          restored.push({
+            fileName: finalName,
+            byteCount: pendingByteCount,
+            record: recoveredRecord,
+          });
+        } catch (error) {
+          issueCount += 1;
+          const originalPendingFile = new File(directory, pendingName);
+          if (originalPendingFile.exists) {
+            unresolvedPending.push({ fileName: pendingName, byteCount: pendingByteCount });
+          } else if (finalFile.exists) {
+            throw error;
+          }
+        }
+      }
+      sessionArchivePendingFilesRef.current = unresolvedPending;
+      setSessionArchivePendingCount(unresolvedPending.length);
+      const uniqueCount = new Set(
+        restored.map(({ record }) => record.entry.archiveId),
+      ).size;
+      issueCount += restored.length - uniqueCount;
+      issueCount += publishSessionArchiveRecords(restored);
+      setSessionArchiveIssueCount(issueCount);
+      setSessionArchiveStorageError(false);
+      sessionArchiveReadyRef.current = true;
+      return true;
+    } catch {
+      setSessionArchiveIssueCount(Math.max(1, issueCount));
+      setSessionArchiveStorageError(true);
+      sessionArchiveReadyRef.current = false;
+      return false;
+    }
+  }
+
   function retainedCsvMatchesIdentity(
     raw: string,
     identity: RetainedImportManifest["session"],
@@ -1948,54 +2328,128 @@ function OzealisApp() {
   }
 
   async function restoreLiveSyncSpool() {
+    const restoreLifecycle = liveSyncLifecycleRef.current;
     try {
       const file = new File(Paths.document, liveSyncSpoolFileName);
-      if (!file.exists) {
+      const manifestFile = new File(Paths.document, liveSyncManifestFileName);
+      if (!file.exists && !manifestFile.exists) {
         liveSyncSpoolReadyRef.current = true;
         return;
       }
+      if (!file.exists || !manifestFile.exists) {
+        throw new Error("Live evidence is missing its CSV or commit marker.");
+      }
       const restored = await file.text();
       const lines = liveSyncSpoolLines(restored);
-      if (!lines) {
-        liveSyncRowsRef.current = [];
-        liveSyncLastMsRef.current = 0;
-        setLiveSyncCsv("");
-        setLiveSyncRowCount(0);
-        writeLiveSyncSpool([]);
-        return;
+      const snapshot = restoreLiveEvidenceSnapshot(
+        restored,
+        await manifestFile.text(),
+        liveSyncCsvHeader,
+        maxLiveSyncRows,
+        isCurrentLiveSyncRow,
+      );
+      if (liveSyncLifecycleRef.current !== restoreLifecycle) return;
+      if (!lines || !snapshot) throw new Error("Live evidence commit validation failed.");
+      const filteredRows = filterIncreasingLiveSyncRows(snapshot.rows);
+      if (!rowsMatch(filteredRows, snapshot.rows)) {
+        throw new Error("Live evidence contains a discontinuous or inactive sample sequence.");
       }
-      const sourceRows = lines.slice(1);
-      const filteredRows = filterIncreasingLiveSyncRows(sourceRows);
-      const rows = filteredRows.slice(-maxLiveSyncRows);
+      const rows = snapshot.rows;
       liveSyncRowsRef.current = rows;
+      liveSyncPendingRowsRef.current = [];
       liveSyncLastMsRef.current = rows.reduce((maxMs, row) => {
         const ms = Number(row.split(",")[0]);
         return Number.isFinite(ms) ? Math.max(maxMs, ms) : maxMs;
       }, 0);
-      setLiveSyncCsv(formatLiveSyncCsv(rows));
+      liveSyncOwnerRef.current = {
+        deviceId: snapshot.manifest.deviceId,
+        sessionId: snapshot.manifest.appSessionId,
+      };
+      liveSyncManifestRef.current = snapshot.manifest;
+      liveReportSnapshotRef.current = {
+        csv: snapshot.csv,
+        rows: [...snapshot.rows],
+        manifest: snapshot.manifest,
+      };
+      liveSyncCreatedAtMsRef.current = snapshot.manifest.createdAtMs;
+      liveSyncProtocolRef.current = snapshot.manifest.protocol;
+      liveSyncFreshRowsRef.current = 0;
+      liveSyncRestoredRef.current = true;
+      setLiveSyncCsv(snapshot.csv);
       setLiveSyncRowCount(rows.length);
-      if (rows.length < sourceRows.length || rows.length < filteredRows.length) {
-        writeLiveSyncSpool(rows);
-      }
+      setLiveSyncFreshRowCount(0);
+      setLiveSyncManifest(snapshot.manifest);
+      setLiveSyncSessionActive(false);
     } catch {
+      if (liveSyncLifecycleRef.current !== restoreLifecycle) return;
       liveSyncRowsRef.current = [];
+      liveSyncPendingRowsRef.current = [];
       liveSyncLastMsRef.current = 0;
+      liveSyncOwnerRef.current = null;
+      liveSyncManifestRef.current = null;
+      liveSyncCreatedAtMsRef.current = 0;
+      liveReportSnapshotRef.current = null;
+      liveSyncProtocolRef.current = "";
+      liveSyncFreshRowsRef.current = 0;
+      liveSyncRestoredRef.current = false;
       setLiveSyncCsv("");
       setLiveSyncRowCount(0);
+      setLiveSyncFreshRowCount(0);
+      setLiveSyncManifest(null);
+      setLiveSyncSessionActive(false);
       writeLiveSyncSpool([]);
     } finally {
       liveSyncSpoolReadyRef.current = true;
+      flushLiveSyncSpool();
     }
   }
 
   function writeLiveSyncSpool(rows: string[]) {
+    if (rows.length === 0) {
+      try {
+        new File(Paths.document, liveSyncSpoolFileName).write("");
+        new File(Paths.document, liveSyncManifestFileName).write("");
+      } catch {
+        // Emptying stale evidence is best-effort; a stale or partial pair still fails closed on restore.
+      }
+      return;
+    }
+
+    const csv = formatLiveSyncCsv(rows);
+    const manifest = updateLiveSyncManifest(rows, csv);
+    if (!manifest) return;
     try {
       const file = new File(Paths.document, liveSyncSpoolFileName);
-      const csv = formatLiveSyncCsv(rows);
-      file.write(csv ? `${csv}\n` : "");
+      file.write(csv);
+      // The manifest is the commit marker. A partial CSV update cannot validate against an older marker.
+      new File(Paths.document, liveSyncManifestFileName).write(serializeLiveEvidenceManifest(manifest));
     } catch {
       // The in-memory live trace still remains exportable if document storage is unavailable.
     }
+  }
+
+  function updateLiveSyncManifest(rows: string[], csv = formatLiveSyncCsv(rows)) {
+    const owner = liveSyncOwnerRef.current;
+    if (!owner || rows.length === 0 || !liveSyncProtocolRef.current) return null;
+    const now = Math.max(Date.now(), liveSyncCreatedAtMsRef.current);
+    const manifest = buildLiveEvidenceManifest({
+      csv,
+      rows,
+      owner,
+      appVersion,
+      protocol: liveSyncProtocolRef.current,
+      nowMs: now,
+      createdAtMs: liveSyncCreatedAtMsRef.current || now,
+    });
+    if (!manifest) return null;
+    liveSyncManifestRef.current = manifest;
+    liveReportSnapshotRef.current = {
+      csv,
+      rows: [...rows],
+      manifest,
+    };
+    setLiveSyncManifest(manifest);
+    return manifest;
   }
 
   function filterIncreasingLiveSyncRows(rows: string[]) {
@@ -2030,15 +2484,28 @@ function OzealisApp() {
 
     try {
       const file = new File(Paths.document, liveSyncSpoolFileName);
+      const manifestFile = new File(Paths.document, liveSyncManifestFileName);
+      const csv = formatLiveSyncCsv(liveSyncRowsRef.current);
+      const manifest = updateLiveSyncManifest(liveSyncRowsRef.current, csv);
+      if (!manifest) return;
       if (!file.exists || liveSyncRowsRef.current.length === pending.length) {
-        file.write(`${liveSyncCsvHeader}\n${pending.join("\n")}\n`);
+        file.write(csv);
+        manifestFile.write(serializeLiveEvidenceManifest(manifest));
         return;
       }
-      const storedRows = readValidLiveSyncSpoolRows(file);
-      if (!storedRows) {
+      const storedSnapshot = readValidLiveSyncSpool(file, manifestFile);
+      if (
+        !storedSnapshot
+        || storedSnapshot.manifest.deviceId !== manifest.deviceId
+        || storedSnapshot.manifest.appSessionId !== manifest.appSessionId
+        || storedSnapshot.manifest.appVersion !== manifest.appVersion
+        || storedSnapshot.manifest.protocol !== manifest.protocol
+        || storedSnapshot.manifest.createdAtMs !== manifest.createdAtMs
+      ) {
         writeLiveSyncSpool(liveSyncRowsRef.current);
         return;
       }
+      const storedRows = storedSnapshot.rows;
       const expectedPending = liveSyncRowsRef.current.slice(storedRows.length);
       if (
         !rowsMatch(storedRows, liveSyncRowsRef.current.slice(0, storedRows.length)) ||
@@ -2051,7 +2518,8 @@ function OzealisApp() {
         writeLiveSyncSpool(liveSyncRowsRef.current);
         return;
       }
-      file.write(`${pending.join("\n")}\n`, { append: true });
+      file.write(`\n${pending.join("\n")}`, { append: true });
+      manifestFile.write(serializeLiveEvidenceManifest(manifest));
     } catch {
       // Persistence is best-effort; UI state and manual export continue to work.
     }
@@ -2061,13 +2529,21 @@ function OzealisApp() {
     return left.length === right.length && left.every((row, index) => row === right[index]);
   }
 
-  function readValidLiveSyncSpoolRows(file: File) {
-    const lines = liveSyncSpoolLines(file.textSync());
+  function readValidLiveSyncSpool(file: File, manifestFile: File) {
+    if (!file.exists || !manifestFile.exists) return null;
+    const csv = file.textSync();
+    const lines = liveSyncSpoolLines(csv);
     if (!lines) return null;
-    if (lines.length === 0) return [] as string[];
-    const rows = lines.slice(1);
-    const filteredRows = filterIncreasingLiveSyncRows(rows);
-    return filteredRows.length === rows.length ? rows : null;
+    const snapshot = restoreLiveEvidenceSnapshot(
+      csv,
+      manifestFile.textSync(),
+      liveSyncCsvHeader,
+      maxLiveSyncRows,
+      isCurrentLiveSyncRow,
+    );
+    if (!snapshot) return null;
+    const filteredRows = filterIncreasingLiveSyncRows(snapshot.rows);
+    return rowsMatch(filteredRows, snapshot.rows) ? snapshot : null;
   }
 
   function liveSyncSpoolLines(raw: string) {
@@ -2083,7 +2559,38 @@ function OzealisApp() {
     return isValidLiveCsvRow(row) && row.split(",").length === 19;
   }
 
-  function captureLiveCsv(value: string) {
+  function beginLiveSyncEvidence(device: Device, sessionId: number) {
+    if (!isCurrentDeviceSession(device, sessionId)) return false;
+    if (
+      !liveSyncRestoredRef.current
+      && isSameLiveEvidenceOwner(liveSyncOwnerRef.current, device.id, sessionId)
+    ) {
+      return true;
+    }
+
+    const now = Date.now();
+    liveSyncLifecycleRef.current += 1;
+    liveSyncRowsRef.current = [];
+    liveSyncPendingRowsRef.current = [];
+    liveSyncLastMsRef.current = 0;
+    liveSyncLastUiMsRef.current = 0;
+    liveSyncOwnerRef.current = { deviceId: device.id, sessionId };
+    liveSyncManifestRef.current = null;
+    liveReportSnapshotRef.current = null;
+    liveSyncCreatedAtMsRef.current = now;
+    liveSyncProtocolRef.current = protocolVersionRef.current;
+    liveSyncFreshRowsRef.current = 0;
+    liveSyncRestoredRef.current = false;
+    setLiveSyncCsv("");
+    setLiveSyncRowCount(0);
+    setLiveSyncFreshRowCount(0);
+    setLiveSyncManifest(null);
+    setLiveSyncSessionActive(false);
+    return isCurrentDeviceSession(device, sessionId);
+  }
+
+  function captureLiveCsv(device: Device, sessionId: number, value: string) {
+    if (!isCurrentDeviceSession(device, sessionId)) return;
     const row = value;
     const parts = row.split(",");
     if (!isCurrentLiveSyncRow(row)) return;
@@ -2091,16 +2598,29 @@ function OzealisApp() {
     const mode = parts[5];
     if (!Number.isFinite(packetMs)) return;
     if (mode !== "1" && mode !== "2") return;
-    if (packetMs <= liveSyncLastMsRef.current) {
-      if (liveSyncLastMsRef.current - packetMs <= liveSyncRestartBackstepMs) return;
+    const incomingOwner = { deviceId: device.id, sessionId };
+    const currentDeviceId = connectedDeviceRef.current?.id;
+    const sampleAction = decideLiveEvidenceSample({
+      currentOwner: currentDeviceId
+        ? { deviceId: currentDeviceId, sessionId: deviceSessionIdRef.current }
+        : null,
+      evidenceOwner: liveSyncOwnerRef.current,
+      incomingOwner,
+      evidenceRestored: liveSyncRestoredRef.current,
+      hasEvidenceRows: liveSyncRowsRef.current.length > 0,
+      lastDeviceMs: liveSyncLastMsRef.current,
+      incomingDeviceMs: packetMs,
+      restartBackstepMs: liveSyncRestartBackstepMs,
+      maximumGapMs: liveSyncMaxSampleGapMs,
+    });
+    if (sampleAction === "reject" || sampleAction === "ignore") return;
+    if (sampleAction === "replace") {
       resetLiveSync();
     }
-    if (liveSyncRowsRef.current.length > 0 && packetMs - liveSyncLastMsRef.current > liveSyncMaxSampleGapMs) {
-      resetLiveSync();
-    }
+    if (!beginLiveSyncEvidence(device, sessionId)) return;
+    if (!isCurrentDeviceSession(device, sessionId)) return;
 
     liveSyncLastMsRef.current = packetMs;
-    setLiveSyncSessionActive(true);
     const firstLiveSyncRow = liveSyncRowsRef.current.length === 0;
     liveSyncRowsRef.current.push(row);
     liveSyncPendingRowsRef.current.push(row);
@@ -2108,9 +2628,19 @@ function OzealisApp() {
       liveSyncRowsRef.current.splice(0, liveSyncRowsRef.current.length - maxLiveSyncRows);
     }
     setLiveSyncRowCount(liveSyncRowsRef.current.length);
+    liveSyncFreshRowsRef.current += 1;
+    const freshRows = liveSyncFreshRowsRef.current;
+    setLiveSyncFreshRowCount(freshRows);
+    if (freshRows === LIVE_EVIDENCE_MIN_FRESH_ROWS) {
+      setLiveSyncSessionActive(true);
+    }
 
     const now = Date.now();
-    if (firstLiveSyncRow || now - liveSyncLastUiMsRef.current >= 1000) {
+    if (
+      firstLiveSyncRow
+      || freshRows === LIVE_EVIDENCE_MIN_FRESH_ROWS
+      || now - liveSyncLastUiMsRef.current >= 1000
+    ) {
       liveSyncLastUiMsRef.current = now;
       flushLiveSyncCsv();
     }
@@ -2354,11 +2884,16 @@ function OzealisApp() {
       Alert.alert("Nothing to export", "Read data from the device first.");
       return;
     }
+    let stagedFile: File | null = null;
+    let removeAfterShare = false;
     try {
       const fileName = `${name}-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`;
-      const file = new File(Paths.document, fileName);
+      const sharingAvailable = await Sharing.isAvailableAsync();
+      removeAfterShare = sharingAvailable;
+      const file = new File(sharingAvailable ? Paths.cache : Paths.document, fileName);
+      stagedFile = file;
       file.write(contents);
-      if (await Sharing.isAvailableAsync()) {
+      if (sharingAvailable) {
         await Sharing.shareAsync(file.uri, { mimeType });
         setMessage(`Export shared: ${fileName}`);
       } else {
@@ -2366,6 +2901,14 @@ function OzealisApp() {
       }
     } catch (error) {
       setMessage(actionErrorMessage(error, "Could not export.", "Export failed."));
+    } finally {
+      if (removeAfterShare && stagedFile?.exists) {
+        try {
+          stagedFile.delete();
+        } catch {
+          // Sharing succeeded; failure to remove the temporary cache copy is non-fatal.
+        }
+      }
     }
   }
 
@@ -2381,9 +2924,447 @@ function OzealisApp() {
     await exportCsv("ozealis-live-10hz", csv);
   }
 
+  function captureCurrentSessionReportDraft(): SessionReportDraft | null {
+    let rawCsv = "";
+    let selectedAirflowCsv = "";
+    let source: SessionReportInput["source"] | null = null;
+    let ownerDeviceId = "";
+
+    if (analysisKind === "live" && liveSyncAnalysisEligible) {
+      const snapshot = liveReportSnapshotRef.current;
+      if (
+        snapshot
+        && snapshot.csv === analysisCsv
+        && connectedDevice
+        && snapshot.manifest.deviceId === connectedDevice.id
+        && snapshot.manifest.appSessionId === deviceSessionIdRef.current
+        && snapshot.manifest.appVersion === appVersion
+        && snapshot.manifest.protocol === OZEALIS_PROTOCOL_VERSION
+      ) {
+        rawCsv = snapshot.csv;
+        selectedAirflowCsv = sessionReportSelectedAirflowCsv(rawCsv) || "";
+        ownerDeviceId = snapshot.manifest.deviceId;
+        source = {
+          kind: "live_app_sync",
+          manifest: { ...snapshot.manifest },
+        };
+      }
+    } else if (
+      analysisKind === "retained"
+      && retainedImport
+      && retainedImportMatchesConnection
+      && retainedImport.sessionCsv === visibleLogCsv
+    ) {
+      rawCsv = retainedImport.sessionCsv;
+      selectedAirflowCsv = sessionReportSelectedAirflowCsv(rawCsv) || "";
+      if (selectedAirflowCsv === analysisCsv) {
+        ownerDeviceId = retainedImport.manifest.deviceId;
+        source = {
+          kind: "retained_firmware",
+          manifest: {
+            ...retainedImport.manifest,
+            session: { ...retainedImport.manifest.session },
+            fault: { ...retainedImport.manifest.fault },
+          },
+          faultCsv: retainedImport.faultCsv,
+        };
+      }
+    }
+
+    if (!source || !ownerDeviceId || !rawCsv || !selectedAirflowCsv) {
+      return null;
+    }
+    return {
+      ownerDeviceId,
+      input: {
+        rawCsv,
+        reportingAppVersion: appVersion,
+        expectedProtocol: OZEALIS_PROTOCOL_VERSION,
+        source,
+      },
+    };
+  }
+
+  async function buildCurrentSessionReportArtifact(): Promise<SessionReportArtifact | null> {
+    const draft = captureCurrentSessionReportDraft();
+    if (!draft) return null;
+    const reportJson = await serializeSessionReportV1(
+      draft.input,
+      digestSha256Text,
+    );
+    return reportJson ? { ...draft, reportJson } : null;
+  }
+
+  async function exportSessionReport() {
+    try {
+      const artifact = await buildCurrentSessionReportArtifact();
+      if (!artifact) {
+        Alert.alert(
+          "Report unavailable",
+          "The full-resolution evidence and its source manifest are not aligned or failed strict integrity validation. Update the log and try again.",
+        );
+        return;
+      }
+      await exportJson("ozealis-session-report-v1", artifact.reportJson);
+    } catch (error) {
+      setMessage(actionErrorMessage(error, "Could not create the session report.", "Session report export failed."));
+    }
+  }
+
+  async function saveCurrentSessionCapture() {
+    const archivedAtMs = Date.now();
+    try {
+      const artifact = await buildCurrentSessionReportArtifact();
+      if (!artifact) {
+        Alert.alert(
+          "Capture unavailable",
+          "The full-resolution evidence and its source manifest are not aligned or failed strict integrity validation. Update the log and try again.",
+        );
+        return;
+      }
+      const record = await createSessionArchiveEntryV1(
+        {
+          ownerDeviceId: artifact.ownerDeviceId,
+          archivedAtMs,
+          reportInput: artifact.input,
+          reportJson: artifact.reportJson,
+        },
+        digestSha256Text,
+      );
+      if (!record) {
+        Alert.alert(
+          "Capture unavailable",
+          "The evidence could not be rebuilt into a self-validating archive entry.",
+        );
+        return;
+      }
+      const result = await enqueueSessionArchiveMutation(async () => {
+        if (
+          !sessionArchiveReadyRef.current
+          && !(await restoreSessionArchive())
+        ) {
+          throw new Error(
+            "Saved captures could not be verified from local storage. Saving remains blocked to protect existing evidence.",
+          );
+        }
+        const existing = sessionArchiveRecordsRef.current.find(
+          (stored) => stored.record.entry.archiveId === record.entry.archiveId,
+        );
+        if (existing) return "existing" as const;
+        if (sessionArchiveRecordsRef.current.length >= SESSION_ARCHIVE_MAX_ENTRIES) {
+          throw new Error(
+            `The saved-capture limit (${SESSION_ARCHIVE_MAX_ENTRIES}) has been reached. Delete an older capture before saving another.`,
+          );
+        }
+        const serialized = serializeSessionArchiveEntryV1(record.entry);
+        const serializedByteCount = Buffer.byteLength(serialized, "utf8");
+        if (
+          serializedByteCount <= 0
+          || serializedByteCount > SESSION_ARCHIVE_MAX_ENTRY_BYTES
+          || sessionArchiveStoredBytesRef.current + serializedByteCount
+            > SESSION_ARCHIVE_MAX_TOTAL_BYTES
+        ) {
+          throw new Error(
+            "The saved-capture storage limit has been reached. Delete older or incomplete captures before saving another.",
+          );
+        }
+
+        const directory = new Directory(Paths.document, sessionArchiveDirectoryName);
+        directory.create({ idempotent: true, intermediates: true });
+        let pendingFile: File | null = null;
+        let finalFile: File | null = null;
+        try {
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            const storageId = Crypto.randomUUID().toLowerCase();
+            const candidatePending = new File(directory, `${storageId}.pending`);
+            const candidateFinal = new File(directory, `${storageId}.json`);
+            if (!candidatePending.exists && !candidateFinal.exists) {
+              pendingFile = candidatePending;
+              finalFile = candidateFinal;
+              break;
+            }
+          }
+          if (!pendingFile || !finalFile) {
+            throw new Error("Could not allocate an opaque archive file name.");
+          }
+
+          pendingFile.write(serialized);
+          const stagedRecord = await verifySessionArchiveEntryV1(
+            await pendingFile.text(),
+            digestSha256Text,
+          );
+          if (!stagedRecord || stagedRecord.entry.archiveId !== record.entry.archiveId) {
+            throw new Error("The staged archive entry failed readback validation.");
+          }
+          await pendingFile.move(finalFile);
+          const committedRecord = await verifySessionArchiveEntryV1(
+            await finalFile.text(),
+            digestSha256Text,
+          );
+          if (!committedRecord || committedRecord.entry.archiveId !== record.entry.archiveId) {
+            throw new Error("The committed archive entry failed readback validation.");
+          }
+          publishSessionArchiveRecords([
+            ...sessionArchiveRecordsRef.current,
+            {
+              fileName: finalFile.name,
+              byteCount: serializedByteCount,
+              record: committedRecord,
+            },
+          ]);
+          sessionArchiveStoredBytesRef.current += serializedByteCount;
+          return "saved" as const;
+        } catch (error) {
+          let cleanupFailed = false;
+          for (const file of [pendingFile, finalFile]) {
+            if (!file?.exists) continue;
+            try {
+              file.delete();
+            } catch {
+              cleanupFailed = true;
+            }
+          }
+          if (cleanupFailed) {
+            sessionArchiveReadyRef.current = false;
+            setSessionArchiveStorageError(true);
+            setSessionArchiveIssueCount((current) => current + 1);
+          }
+          throw error;
+        }
+      });
+      setMessage(
+        result === "existing"
+          ? "This exact evidence capture is already saved."
+          : "Evidence capture saved and verified.",
+      );
+    } catch (error) {
+      setMessage(
+        actionErrorMessage(
+          error,
+          "Could not save this evidence capture.",
+          "Session archive save failed.",
+        ),
+      );
+    }
+  }
+
+  async function exportArchivedReport(stored: StoredSessionArchiveRecord) {
+    await exportJson("ozealis-archived-session-report-v1", stored.record.entry.report.json);
+  }
+
+  async function exportArchivedRawEvidence(stored: StoredSessionArchiveRecord) {
+    const sourceName = stored.record.entry.reportInput.source.kind === "live_app_sync"
+      ? "ozealis-archived-live-10hz"
+      : "ozealis-archived-retained-session";
+    await exportCsv(sourceName, stored.record.entry.evidence.rawCsv);
+  }
+
+  function confirmDeleteArchivedSession(stored: StoredSessionArchiveRecord) {
+    Alert.alert(
+      "Delete saved capture?",
+      "This removes the locally saved evidence bundle. Export anything you need first.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void enqueueSessionArchiveMutation(async () => {
+              const current = sessionArchiveRecordsRef.current.find(
+                (candidate) =>
+                  candidate.fileName === stored.fileName
+                  && candidate.record.entry.archiveId === stored.record.entry.archiveId,
+              );
+              if (!current || !sessionArchiveFileNamePattern.test(current.fileName)) return;
+              try {
+                const directory = new Directory(Paths.document, sessionArchiveDirectoryName);
+                const files = directory
+                  .list()
+                  .filter(
+                    (candidate): candidate is File =>
+                      candidate instanceof File
+                      && sessionArchiveFileNamePattern.test(candidate.name),
+                  );
+                if (files.length > sessionArchiveMaxRestoreFiles) {
+                  throw new Error("The archive changed and now contains too many files.");
+                }
+                const listedBytes = files.reduce(
+                  (total, file) =>
+                    Number.isSafeInteger(file.size) && file.size > 0
+                      ? Math.min(Number.MAX_SAFE_INTEGER, total + file.size)
+                      : total,
+                  0,
+                );
+                if (listedBytes > SESSION_ARCHIVE_MAX_TOTAL_BYTES) {
+                  throw new Error("The archive changed and now exceeds the bounded size.");
+                }
+                const targetFile = files.find((file) => file.name === current.fileName);
+                if (!targetFile) {
+                  throw new Error("The saved capture file was not found.");
+                }
+                const orderedFiles = [
+                  targetFile,
+                  ...files.filter((file) => file.name !== current.fileName),
+                ];
+                let removedBytes = 0;
+                let removedCount = 0;
+                for (const file of orderedFiles) {
+                  const isTarget = file.name === current.fileName;
+                  const byteCount = file.size;
+                  if (
+                    !Number.isSafeInteger(byteCount)
+                    || byteCount <= 0
+                    || byteCount > SESSION_ARCHIVE_MAX_ENTRY_BYTES
+                  ) {
+                    if (isTarget) {
+                      throw new Error("The selected archive file changed after restore.");
+                    }
+                    continue;
+                  }
+                  let verified: VerifiedSessionArchiveRecordV1 | null = null;
+                  try {
+                    verified = await verifySessionArchiveEntryV1(
+                      await file.text(),
+                      digestSha256Text,
+                    );
+                  } catch {
+                    if (isTarget) {
+                      throw new Error("The selected archive file could not be reverified.");
+                    }
+                  }
+                  const sameContent =
+                    verified?.entry.archiveId === current.record.entry.archiveId;
+                  if (!sameContent) {
+                    if (isTarget) {
+                      throw new Error("The selected archive file changed after restore.");
+                    }
+                    continue;
+                  }
+                  if (file.exists) file.delete();
+                  if (file.exists) throw new Error("An archive content copy is still present.");
+                  removedBytes += byteCount;
+                  removedCount += 1;
+                }
+                sessionArchiveStoredBytesRef.current = Math.max(
+                  0,
+                  sessionArchiveStoredBytesRef.current - removedBytes,
+                );
+                const hadOverflow =
+                  sessionArchiveRecordsRef.current.length > SESSION_ARCHIVE_MAX_ENTRIES;
+                const overflowCount = publishSessionArchiveRecords(
+                  sessionArchiveRecordsRef.current.filter(
+                    (candidate) =>
+                      candidate.fileName !== current.fileName
+                      || candidate.record.entry.archiveId
+                        !== current.record.entry.archiveId,
+                  ),
+                );
+                if (hadOverflow || removedCount > 1) {
+                  const resolvedIssueCount =
+                    (hadOverflow ? 1 : 0) + Math.max(0, removedCount - 1);
+                  setSessionArchiveIssueCount((count) =>
+                    Math.max(
+                      sessionArchivePendingFilesRef.current.length + overflowCount,
+                      count - resolvedIssueCount,
+                    ));
+                }
+                if (comparisonBaselineArchiveId === current.record.entry.archiveId) {
+                  setComparisonBaselineArchiveId("");
+                }
+                if (comparisonCurrentArchiveId === current.record.entry.archiveId) {
+                  setComparisonCurrentArchiveId("");
+                  setComparisonBaselineArchiveId("");
+                }
+                setMessage("Saved evidence capture deleted.");
+              } catch (error) {
+                sessionArchiveReadyRef.current = false;
+                setSessionArchiveStorageError(true);
+                setMessage(
+                  actionErrorMessage(
+                    error,
+                    "Could not delete the saved capture.",
+                    "Session archive delete failed.",
+                  ),
+                );
+              }
+            });
+          },
+        },
+      ],
+    );
+  }
+
+  function confirmDeleteIncompleteArchiveFiles() {
+    const pendingCount = sessionArchivePendingFilesRef.current.length;
+    if (pendingCount === 0) return;
+    Alert.alert(
+      "Remove incomplete saves?",
+      "These staged files never became verified saved captures. This action cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove incomplete saves",
+          style: "destructive",
+          onPress: () => {
+            void enqueueSessionArchiveMutation(async () => {
+              if (
+                !sessionArchiveReadyRef.current
+                && sessionArchivePendingFilesRef.current.length === 0
+                && !(await restoreSessionArchive())
+              ) {
+                setMessage("Incomplete saves could not be checked because archive storage is unavailable.");
+                return;
+              }
+              const directory = new Directory(Paths.document, sessionArchiveDirectoryName);
+              const remaining: PendingSessionArchiveFile[] = [];
+              let removedCount = 0;
+              for (const pending of sessionArchivePendingFilesRef.current) {
+                if (!sessionArchivePendingFileNamePattern.test(pending.fileName)) {
+                  remaining.push(pending);
+                  continue;
+                }
+                try {
+                  const file = new File(directory, pending.fileName);
+                  if (file.exists) file.delete();
+                  if (file.exists) throw new Error("The incomplete file is still present.");
+                  removedCount += 1;
+                } catch {
+                  remaining.push(pending);
+                }
+              }
+              sessionArchivePendingFilesRef.current = remaining;
+              setSessionArchivePendingCount(remaining.length);
+              sessionArchiveReadyRef.current = false;
+              const restored = await restoreSessionArchive();
+              if (!restored) {
+                setMessage(
+                  removedCount > 0
+                    ? "Incomplete saves were removed, but archive storage still could not be fully verified."
+                    : "Incomplete saves could not be removed or archive storage is still unavailable.",
+                );
+                return;
+              }
+              const remainingCount = sessionArchivePendingFilesRef.current.length;
+              setMessage(
+                remainingCount === 0
+                  ? "Incomplete archive saves removed."
+                  : `${remainingCount} incomplete archive ${remainingCount === 1 ? "file remains" : "files remain"}.`,
+              );
+            });
+          },
+        },
+      ],
+    );
+  }
+
   async function exportJson(name: string, contents: string) {
     await exportFile(name, contents, "json", "application/json");
   }
+
+  /*
+   * Archive entries are read-only evidence. Opening, comparing, exporting, or
+   * deleting one never replaces the active BLE source or changes write gates.
+   */
 
   async function readDriverParams() {
     if (!connectedDevice) return;
@@ -3308,10 +4289,42 @@ function OzealisApp() {
             {advancedMode ? (
               <>
                 <Text style={styles.subhead}>Session CSV</Text>
-                <ValueRow label="Live synced rows" value={liveSyncRows > 0 ? String(liveSyncRows) : "--"} />
+                <ValueRow label="Exportable live rows" value={liveSyncRows > 0 ? String(liveSyncRows) : "--"} />
+                <ValueRow
+                  label="Current-session live rows"
+                  value={liveSyncFreshRowCount > 0 ? String(liveSyncFreshRowCount) : "--"}
+                />
                 <ValueRow label="Live synced window" value={liveSyncCsv ? formatDuration(liveSyncSummary.durationSec) : "--"} />
-                <ValueRow label="Session rows" value={visibleLogCsv ? String(sessionRows) : "--"} />
-                <ValueRow label="Retained window" value={visibleLogCsv ? formatDuration(sessionSummary.durationSec) : "--"} />
+                <ValueRow
+                  label="Live evidence source"
+                  value={
+                    liveSyncManifest
+                      ? liveSyncEvidenceMatchesConnection
+                        ? `${liveSyncManifest.deviceId} / app session ${liveSyncManifest.appSessionId}`
+                        : `${liveSyncManifest.deviceId} / stored export only`
+                      : "--"
+                  }
+                />
+                <ValueRow
+                  label="Live analysis state"
+                  value={
+                    liveSyncAnalysisEligible
+                      ? "Current source admitted"
+                      : liveSyncFreshRowCount > 0 && !protocolCompatible
+                        ? "Protocol mismatch; export only"
+                      : liveSyncFreshRowCount > 0 && liveSyncManifest && !liveSyncManifestMatchesCurrentBuild
+                        ? "Evidence metadata mismatch; export only"
+                      : liveSyncFreshRowCount > 0 && !liveSyncModeEligible
+                        ? "Airflow inactive; export only"
+                      : liveSyncFreshRowCount > 0
+                        ? `Collecting fresh rows (${liveSyncFreshRowCount}/${LIVE_EVIDENCE_MIN_FRESH_ROWS})`
+                        : liveSyncRows > 0
+                          ? "Stored export only"
+                          : "--"
+                  }
+                />
+                <ValueRow label="Retained evidence rows" value={visibleLogCsv ? String(sessionRows) : "--"} />
+                <ValueRow label="Airflow-run window" value={visibleLogCsv ? formatDuration(sessionSummary.durationSec) : "--"} />
                 <ValueRow
                   label="Retained source"
                   value={retainedImportMatchesConnection && retainedImportManifest ? retainedImportManifest.deviceId : "--"}
@@ -3327,7 +4340,7 @@ function OzealisApp() {
                 <ValueRow label="Analysis source" value={analysisSource} />
                 <ValueRow label="Graph view" value={graphWindowLabel} />
                 <Text style={styles.mutedText}>
-                  Connected app sessions keep the latest 60 minutes of live CSV at up to 10 Hz. If Bluetooth disconnects, analysis derates to the rolling 30-minute 1 Hz retained firmware buffer; the last live trace remains exportable.
+                  Connected app sessions keep the latest 60 minutes of identity-bound live CSV at up to 10 Hz. Ten fresh rows from the exact current connection are required before that source is admitted. A disconnected or restored trace remains exportable but is never attributed to a replacement connection.
                 </Text>
                 {graphSourcePoints.length > 0 && <GraphScaleSelector advanced={advancedMode} value={activeGraphScale} onChange={setGraphScale} />}
               </>
@@ -3366,7 +4379,12 @@ function OzealisApp() {
             {advancedMode || selectedDataCsv.trim() ? (
               <>
                 <SessionGraphs points={sessionGraphPoints} advanced={advancedMode} />
-                <PotentialObservations observations={sessionObservations} sessionLoaded={Boolean(visibleAnalysisCsv.trim())} advanced={advancedMode} />
+                <PotentialObservations
+                  observations={sessionObservations}
+                  status={sessionAnalysis.status}
+                  evidenceBasis={sessionAnalysis.evidenceBasis}
+                  advanced={advancedMode}
+                />
               </>
             ) : (
               <Text style={styles.mutedText}>Your pressure and airflow graphs will appear here.</Text>
@@ -3380,6 +4398,22 @@ function OzealisApp() {
             {advancedMode && (
               <>
                 <ActionButton
+                  icon="archive"
+                  label="Save current evidence capture"
+                  onPress={saveCurrentSessionCapture}
+                  disabled={!analysisCsv.trim()}
+                />
+                <ActionButton
+                  icon="share"
+                  label="Export session report JSON"
+                  onPress={exportSessionReport}
+                  disabled={!analysisCsv.trim()}
+                  secondary
+                />
+                <Text style={styles.mutedText}>
+                  The report summarizes full-resolution evidence and byte fingerprints without exporting the BLE device identity. Raw CSV remains a separate export.
+                </Text>
+                <ActionButton
                   icon="share"
                   label="Export live 10 Hz CSV"
                   onPress={exportLiveSyncCsv}
@@ -3391,6 +4425,157 @@ function OzealisApp() {
                 <ValueRow label="Fault rows" value={visibleFaultCsv ? String(faultRows) : "--"} />
                 <Text style={styles.logBox}>{faultPreview || "No fault log loaded."}</Text>
                 <ActionButton icon="share" label="Export fault CSV" onPress={() => exportCsv("ozealis-faults", visibleFaultCsv)} disabled={!visibleFaultCsv.trim()} secondary />
+                <Text style={styles.subhead}>Saved evidence captures</Text>
+                <ValueRow
+                  label="Validated captures"
+                  value={sessionArchiveRecords.length > 0 ? String(sessionArchiveRecords.length) : "--"}
+                />
+                {sessionArchiveStorageError && (
+                  <Text style={styles.mutedText}>
+                    Saved captures could not be fully verified from local storage. New saves stay blocked until a complete restore succeeds; existing files are not deleted.
+                  </Text>
+                )}
+                {sessionArchiveIssueCount > 0 && (
+                  <Text style={styles.mutedText}>
+                    {sessionArchiveIssueCount} local archive {sessionArchiveIssueCount === 1 ? "file was" : "files were"} not admitted because validation, deduplication, recovery, or capacity checks did not pass.
+                  </Text>
+                )}
+                {sessionArchivePendingCount > 0 && (
+                  <>
+                    <Text style={styles.mutedText}>
+                      {sessionArchivePendingCount} interrupted staged {sessionArchivePendingCount === 1 ? "save remains" : "saves remain"}. Valid staged evidence is recovered automatically; the remaining files are not treated as saved captures.
+                    </Text>
+                    <View style={styles.archiveActions}>
+                      <ArchiveAction
+                        label="Remove incomplete saves"
+                        onPress={confirmDeleteIncompleteArchiveFiles}
+                        destructive
+                      />
+                    </View>
+                  </>
+                )}
+                <Text style={styles.mutedText}>
+                  Saved captures retain exact raw evidence for later verification. Save time is an app clock anchor, not synchronized device time. Entries remain unauthenticated experimental evidence and may be included in platform backups.
+                </Text>
+                {sessionArchiveRecords.length === 0 && (
+                  <Text style={styles.mutedText}>No evidence captures have been saved on this app installation.</Text>
+                )}
+                {visibleArchivedSessions.map((stored) => {
+                  const record = stored.record;
+                  const hasSameOwnerPeer = sessionArchiveRecords.some(
+                    (candidate) =>
+                      candidate.record.entry.archiveId !== record.entry.archiveId
+                      && candidate.record.entry.owner.fingerprint
+                      === record.entry.owner.fingerprint
+                  );
+                  const selectedAsCurrent =
+                    selectedComparisonCurrent?.record.entry.archiveId
+                    === record.entry.archiveId;
+                  const canUseAsBaseline =
+                    !selectedAsCurrent
+                    && selectedComparisonCurrent?.record.entry.owner.fingerprint
+                      === record.entry.owner.fingerprint;
+                  const selectedForComparison =
+                    selectedComparisonBaseline?.record.entry.archiveId
+                    === record.entry.archiveId;
+                  return (
+                    <View key={record.entry.archiveId} style={styles.archiveRow}>
+                      <Text style={styles.archiveTitle}>
+                        Saved {new Date(record.entry.archivedAtMs).toLocaleString()}
+                      </Text>
+                      <Text style={styles.archiveDetail}>
+                        {archiveSourceLabel(record)} · {formatDuration(record.report.evidence.creditedDurationMs / 1_000)} · {record.report.evidence.selectedRows} selected rows
+                      </Text>
+                      <View style={styles.archiveActions}>
+                        {hasSameOwnerPeer && (
+                          <ArchiveAction
+                            label={selectedAsCurrent ? "Comparison current" : "Use as current"}
+                            onPress={() => {
+                              setComparisonCurrentArchiveId(record.entry.archiveId);
+                              setComparisonBaselineArchiveId("");
+                            }}
+                            active={selectedAsCurrent}
+                          />
+                        )}
+                        {canUseAsBaseline && (
+                          <ArchiveAction
+                            label={selectedForComparison ? "Comparison baseline" : "Use as baseline"}
+                            onPress={() => setComparisonBaselineArchiveId(record.entry.archiveId)}
+                            active={selectedForComparison}
+                          />
+                        )}
+                        <ArchiveAction label="Report" onPress={() => exportArchivedReport(stored)} />
+                        <ArchiveAction label="Raw CSV" onPress={() => exportArchivedRawEvidence(stored)} />
+                        {record.entry.evidence.faultCsv !== null && (
+                          <ArchiveAction
+                            label="Fault CSV"
+                            onPress={() => exportCsv(
+                              "ozealis-archived-retained-faults",
+                              record.entry.evidence.faultCsv || "",
+                            )}
+                          />
+                        )}
+                        <ArchiveAction
+                          label="Delete"
+                          onPress={() => confirmDeleteArchivedSession(stored)}
+                          destructive
+                        />
+                      </View>
+                    </View>
+                  );
+                })}
+                {sessionArchiveRecords.length > 5 && (
+                  <ActionButton
+                    icon={showAllArchivedSessions ? "chevron-up" : "chevron-down"}
+                    label={
+                      showAllArchivedSessions
+                        ? "Show latest 5 captures"
+                        : `Show all ${sessionArchiveRecords.length} captures`
+                    }
+                    onPress={() => setShowAllArchivedSessions((current) => !current)}
+                    secondary
+                  />
+                )}
+                <Text style={styles.subhead}>Saved comparison</Text>
+                {sessionArchiveComparison && selectedComparisonBaseline && selectedComparisonCurrent ? (
+                  <>
+                    <ValueRow
+                      label="Comparison state"
+                      value={
+                        sessionArchiveComparison.status === "comparable"
+                          ? "Comparable evidence windows"
+                          : sessionArchiveComparison.status === "limited"
+                            ? "Limited comparison"
+                            : "Comparison unavailable"
+                      }
+                    />
+                    <Text style={styles.mutedText}>
+                      Baseline saved {new Date(selectedComparisonBaseline.record.entry.archivedAtMs).toLocaleString()}; current saved {new Date(selectedComparisonCurrent.record.entry.archivedAtMs).toLocaleString()}.
+                    </Text>
+                    {sessionArchiveComparison.metrics.map((metric) => (
+                      <ValueRow
+                        key={metric.code}
+                        label={metric.label}
+                        value={formatSessionComparisonMetric(metric)}
+                      />
+                    ))}
+                    <Text style={styles.mutedText}>{sessionArchiveComparison.evidenceBasis}</Text>
+                    {sessionArchiveComparison.reasonCodes.length > 0 && (
+                      <Text style={styles.archiveLimitation}>
+                        Reasons: {sessionArchiveComparison.reasonCodes
+                          .map(sessionComparisonReasonLabel)
+                          .join("; ")}.
+                      </Text>
+                    )}
+                    {sessionArchiveComparison.limitations.map((limitation) => (
+                      <Text key={limitation} style={styles.archiveLimitation}>• {limitation}</Text>
+                    ))}
+                  </>
+                ) : (
+                  <Text style={styles.mutedText}>
+                    Save two different evidence captures from the same local Ozealis to compare factual values.
+                  </Text>
+                )}
               </>
             )}
           </View>
@@ -3916,6 +5101,40 @@ function ActionButton({
   );
 }
 
+function ArchiveAction({
+  label,
+  onPress,
+  active,
+  destructive,
+}: {
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+  destructive?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      style={[
+        styles.archiveAction,
+        active && styles.archiveActionActive,
+        destructive && styles.archiveActionDestructive,
+      ]}
+      onPress={onPress}
+    >
+      <Text
+        style={[
+          styles.archiveActionText,
+          active && styles.archiveActionTextActive,
+          destructive && styles.archiveActionTextDestructive,
+        ]}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 function SessionGraphs({ points, advanced }: { points: SessionGraphPoint[]; advanced: boolean }) {
   if (points.length === 0) {
     return (
@@ -3926,9 +5145,9 @@ function SessionGraphs({ points, advanced }: { points: SessionGraphPoint[]; adva
   }
 
   const hasOximetry = points.some((point) => Number.isFinite(point.spo2Percent) || Number.isFinite(point.pulseBpm));
-  const hasEnvironment = points.some(
-    (point) => Number.isFinite(point.humidifierTempC) || Number.isFinite(point.humidifierRhPercent) || Number.isFinite(point.hoseTempC),
-  );
+  const hasHumidity = points.some((point) => Number.isFinite(point.humidifierRhPercent));
+  const hasAirTemperature = points.some((point) => Number.isFinite(point.humidifierTempC));
+  const hasHoseTemperature = points.some((point) => Number.isFinite(point.hoseTempC));
 
   return (
     <View style={styles.sessionGraphs}>
@@ -3962,30 +5181,32 @@ function SessionGraphs({ points, advanced }: { points: SessionGraphPoint[]; adva
       )}
       {advanced && (
         <>
-          {hasEnvironment && (
-            <>
-              <GraphPlot
-                label="Humidity"
-                unit="% RH"
-                color="#0891b2"
-                values={points.map((point) => point.humidifierRhPercent ?? Number.NaN)}
-                showRange
-              />
-              <GraphPlot
-                label="Air temperature"
-                unit="C"
-                color="#b45309"
-                values={points.map((point) => point.humidifierTempC ?? Number.NaN)}
-                showRange
-              />
-              <GraphPlot
-                label="Hose temperature"
-                unit="C"
-                color="#854d0e"
-                values={points.map((point) => point.hoseTempC ?? Number.NaN)}
-                showRange
-              />
-            </>
+          {hasHumidity && (
+            <GraphPlot
+              label="Humidity"
+              unit="% RH"
+              color="#0891b2"
+              values={points.map((point) => point.humidifierRhPercent ?? Number.NaN)}
+              showRange
+            />
+          )}
+          {hasAirTemperature && (
+            <GraphPlot
+              label="Air temperature"
+              unit="C"
+              color="#b45309"
+              values={points.map((point) => point.humidifierTempC ?? Number.NaN)}
+              showRange
+            />
+          )}
+          {hasHoseTemperature && (
+            <GraphPlot
+              label="Hose temperature"
+              unit="C"
+              color="#854d0e"
+              values={points.map((point) => point.hoseTempC ?? Number.NaN)}
+              showRange
+            />
           )}
           <GraphPlot
             label="Driver FG"
@@ -4031,39 +5252,48 @@ function GraphScaleSelector({
 
 function PotentialObservations({
   observations,
-  sessionLoaded,
+  status,
+  evidenceBasis,
   advanced,
 }: {
   observations: SessionObservation[];
-  sessionLoaded: boolean;
+  status: SessionAnalysisStatus;
+  evidenceBasis: string;
   advanced: boolean;
 }) {
   const preview = observations.slice(0, 6);
   return (
     <View style={styles.observationBlock}>
-      <Text style={styles.graphLabel}>{advanced ? "Potential breathing observations" : "Airflow notes"}</Text>
+      <Text style={styles.graphLabel}>{advanced ? "Heuristic airflow windows" : "Airflow notes"}</Text>
       <Text style={styles.observationNotice}>
         {advanced
-          ? "Non-diagnostic heuristic flags from the imported flow proxy. These are not AHI, diagnosis, screening, or treatment guidance."
+          ? "Non-diagnostic heuristic windows from the imported flow proxy. These are not AHI, diagnosis, screening, or treatment guidance."
           : "Notes from the airflow trend. These are not medical advice or diagnosis."}
       </Text>
-      {!sessionLoaded && <Text style={styles.mutedText}>Notes will appear here.</Text>}
-      {sessionLoaded && observations.length === 0 && (
-        <Text style={styles.mutedText}>{advanced ? "No low-flow observation windows detected in the imported session." : "Nothing unusual noted."}</Text>
+      {status === "unavailable" && <Text style={styles.mutedText}>Notes will appear after valid airflow evidence is available.</Text>}
+      {status === "insufficient" && (
+        <Text style={styles.mutedText}>
+          {advanced ? evidenceBasis : "There is not enough airflow evidence for notes yet."}
+        </Text>
+      )}
+      {status === "analyzed" && observations.length === 0 && (
+        <Text style={styles.mutedText}>
+          {advanced ? "No reduced-flow intervals were detected in the analyzed evidence window." : "No reduced-flow intervals were noted."}
+        </Text>
       )}
       {preview.map((observation, index) => (
         <View key={`${observation.startMs}-${index}`} style={styles.observationRow}>
           <Text style={styles.observationType}>{advanced ? observation.type : "Airflow note"}</Text>
           <Text style={styles.observationDetail}>
             {advanced
-              ? `${formatElapsed(observation.startMs)} for ${observation.durationSec}s, ${observation.confidence} confidence, flow drop about ${observation.flowDropPercent}%`
+              ? `${formatElapsed(observation.startMs)} for ${observation.durationSec}s, flow reduction about ${observation.flowDropPercent}%`
               : `Around ${formatElapsed(observation.startMs)} for about ${observation.durationSec}s.`}
           </Text>
-          {advanced && <Text style={styles.observationBasis}>{observation.basis}</Text>}
+          {advanced && <Text style={styles.observationBasis}>{observation.evidenceBasis}</Text>}
         </View>
       ))}
       {observations.length > preview.length && (
-        <Text style={styles.mutedText}>{observations.length - preview.length} more {advanced ? "flags in this session" : "notes here"}.</Text>
+        <Text style={styles.mutedText}>{observations.length - preview.length} more {advanced ? "windows in this data" : "notes here"}.</Text>
       )}
     </View>
   );
@@ -4099,7 +5329,10 @@ function GraphPlot({
       </View>
       <View style={styles.graphTrack}>
         {values.map((value, index) => {
-          const normalized = Number.isFinite(value) ? (value - min) / range : 0;
+          if (!Number.isFinite(value)) {
+            return <View key={`${label}-${index}`} style={styles.graphGap} />;
+          }
+          const normalized = (value - min) / range;
           const height = 4 + normalized * 72;
           return <View key={`${label}-${index}`} style={[styles.graphBar, { height, backgroundColor: color }]} />;
         })}
@@ -4151,18 +5384,10 @@ function windowGraphPoints(points: SessionGraphPoint[], scale: GraphScale, maxPo
   const windowMs = graphScaleWindowsMs[scale];
   const lastMs = points[points.length - 1].ms;
   const windowed = windowMs === null ? points : points.filter((point) => point.ms >= lastMs - windowMs);
-  return downsampleGraphPoints(windowed.length > 0 ? windowed : points.slice(-1), maxPoints);
-}
-
-function downsampleGraphPoints(points: SessionGraphPoint[], maxPoints: number): SessionGraphPoint[] {
-  const pointLimit = Number.isFinite(maxPoints) ? Math.max(0, Math.floor(maxPoints)) : 120;
-  if (pointLimit === 0) return [];
-  if (pointLimit === 1) return points.length > 0 ? [points[points.length - 1]] : [];
-  if (points.length <= pointLimit) return points;
-  return Array.from({ length: pointLimit }, (_, index) => {
-    const sourceIndex = Math.round((index * (points.length - 1)) / (pointLimit - 1));
-    return points[sourceIndex];
-  });
+  return downsampleSessionGraphPoints(
+    windowed.length > 0 ? windowed : points.slice(-1),
+    maxPoints,
+  );
 }
 
 function formatGraphWindowLabel(points: SessionGraphPoint[], sourcePoints: SessionGraphPoint[], scale: GraphScale, advanced: boolean): string {
@@ -4183,6 +5408,61 @@ function formatDuration(totalSeconds: number): string {
   const remainingSeconds = seconds % 60;
   if (minutes === 0) return `${remainingSeconds}s`;
   return `${minutes}m ${remainingSeconds}s`;
+}
+
+function archiveSourceLabel(record: VerifiedSessionArchiveRecordV1): string {
+  return record.entry.reportInput.source.kind === "live_app_sync"
+    ? "Live app capture"
+    : "Retained firmware capture";
+}
+
+function formatSessionComparisonMetric(metric: SessionComparisonMetric): string {
+  const baseline = formatComparisonMetricNumber(metric, metric.baseline);
+  const current = formatComparisonMetricNumber(metric, metric.current);
+  if (metric.deltaState === "unavailable") {
+    return `${baseline} → ${current}; delta unavailable`;
+  }
+  if (metric.deltaState === "suppressed" || metric.delta === null) {
+    return `${baseline} → ${current}; delta suppressed`;
+  }
+  const delta = formatComparisonMetricNumber(metric, Math.abs(metric.delta));
+  const sign = metric.delta > 0 ? "+" : metric.delta < 0 ? "-" : "";
+  return `${baseline} → ${current}; delta ${sign}${delta}`;
+}
+
+function sessionComparisonReasonLabel(reason: SessionComparisonReasonCode): string {
+  const labels: Record<SessionComparisonReasonCode, string> = {
+    same_archive_entry: "the same saved capture is selected twice",
+    duplicate_selected_evidence: "the selected evidence bytes are duplicates",
+    different_device_owner: "the captures have different local device owners",
+    incompatible_report_contract: "the report, parser, protocol, or scope contracts differ",
+    reporting_software_differs: "the reporting app versions differ",
+    analysis_contract_differs: "the heuristic analysis contracts differ",
+    missing_selected_evidence: "selected airflow evidence is missing",
+    different_source_formats: "the live and retained source formats differ",
+    possible_rolling_truncation: "at least one rolling evidence window may be truncated",
+    low_cadence_coverage: "cadence coverage is missing or below the comparison threshold",
+    different_evidence_durations: "the credited evidence durations differ by more than twofold",
+    analysis_status_differs: "the heuristic analysis states differ",
+    heuristic_analysis_unavailable: "a heuristic comparison is unavailable",
+    window_result_limit_ambiguous: "at least one report reached the V1 50-window output cap",
+    discarded_earlier_segments: "at least one report compares only its latest airflow segment",
+  };
+  return labels[reason];
+}
+
+function formatComparisonMetricNumber(
+  metric: SessionComparisonMetric,
+  value: number | null,
+): string {
+  if (value === null || !Number.isFinite(value)) return "--";
+  if (metric.unit === "ms") return formatDuration(value / 1_000);
+  if (metric.unit === "ratio") return `${(value * 100).toFixed(1)}%`;
+  if (metric.unit === "rows" || metric.unit === "windows") {
+    return String(Math.round(value));
+  }
+  const formatted = Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `${formatted} ${metric.unit}`;
 }
 
 const styles = StyleSheet.create({
@@ -4646,6 +5926,63 @@ const styles = StyleSheet.create({
   actionTextSecondary: {
     color: accent,
   },
+  archiveRow: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  archiveTitle: {
+    color: "#0f172a",
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+  },
+  archiveDetail: {
+    marginTop: 2,
+    color: "#64748b",
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  archiveActions: {
+    marginTop: 8,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  archiveAction: {
+    minHeight: 36,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#99f6e4",
+    backgroundColor: "#ffffff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  archiveActionActive: {
+    backgroundColor: "#ccfbf1",
+    borderColor: accent,
+  },
+  archiveActionDestructive: {
+    borderColor: "#fecaca",
+  },
+  archiveActionText: {
+    color: accent,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  archiveActionTextActive: {
+    color: "#134e4a",
+  },
+  archiveActionTextDestructive: {
+    color: "#b91c1c",
+  },
+  archiveLimitation: {
+    marginTop: 4,
+    color: "#64748b",
+    fontSize: 12,
+    lineHeight: 18,
+  },
   disabled: {
     opacity: 0.5,
   },
@@ -4789,6 +6126,10 @@ const styles = StyleSheet.create({
     minWidth: 1,
     borderTopLeftRadius: 2,
     borderTopRightRadius: 2,
+  },
+  graphGap: {
+    flex: 1,
+    minWidth: 1,
   },
   observationBlock: {
     marginBottom: 12,

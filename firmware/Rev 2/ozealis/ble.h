@@ -10,7 +10,7 @@
 #include "autopap.h"
 
 #define UUID_CpapService "7f2d5f4a-0f4d-4a1f-9f84-0c2a6b3d0000"
-#define OZEALIS_PROTOCOL_VERSION "ozealis-ble-v2"
+#define OZEALIS_PROTOCOL_VERSION "ozealis-ble-v3"
 
 #define UUID_CHAR_PRESSURE "7f2d0001-0f4d-4a1f-9f84-0c2a6b3d0000"
 #define UUID_CHAR_FLOW "7f2d0002-0f4d-4a1f-9f84-0c2a6b3d0000"

@@ -66,7 +66,7 @@ assertContains("Simple data messages require expected-family valid row count", l
 assertOrder("Simple auto data hides retained-session copy behind current advanced state", logImportBranch, "const messageAdvanced = advancedModeRef.current;", "Latest retained session");
 assertContains("Simple Data quiet empty state", mobileApp, "Your pressure and airflow graphs will appear here.");
 assertContains("Simple Data selected-day graph source", mobileApp, "const visibleAnalysisCsv = advancedMode ? analysisCsv : selectedDataCsv;");
-assertContains("Simple Data selected-day observations source", mobileApp, "flagSessionObservations(visibleAnalysisCsv)");
+assertContains("Simple Data selected-day analysis source", mobileApp, "analyzeSessionCsv(visibleAnalysisCsv)");
 assertContains("Simple Home hides start until usable", mobileApp, "showSimpleStart &&");
 assertContains("Simple Home only shows verified usable start", mobileApp, "const showSimpleStart = controlStartAllowed;");
 assertContains("Simple Home stop requires verified protocol", mobileApp, "const showSimpleStop = canUseDevice && protocolCompatible");
